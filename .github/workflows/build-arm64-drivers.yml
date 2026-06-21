@@ -40,23 +40,33 @@ jobs:
       - name: Build ARM64 drivers
         shell: pwsh
         run: |
-          # 透過 sln target 建 -> 讓 sln 自動解相依（VirtioLib / VirtioLib-WDF / Mof / CoInstaller）。
-          # rdmapool 不在主 sln，單獨建（config 為 Release）。
-          # ApiValidator_Enable=false：rdmapool 用了非 Universal DDI，跳過事後驗證（驅動已成功產出）。
-          $common = @('/m','/p:Platform=ARM64','/p:ApiValidator_Enable=false','/p:SpectreMitigation=false','/p:SignMode=Off')
-          $slnTargets = @('viostor','vioscsi','vioser','viorng','viosock','NetKVM-VS2015')
+          # 逐 vcxproj 建，先按相依順序建 deps（msbuild sln /t:proj 不可靠，會把名稱當 target）：
+          #   Mof(產 netkvmmof.h) -> VirtioLib / VirtioLib-WDF -> CoInstaller -> 各驅動 -> rdmapool
+          $common = @('/m','/p:ApiValidator_Enable=false','/p:SpectreMitigation=false','/p:SignMode=Off')
+          $jobs = @(
+            @{ p='NetKVM/Mof/Mof.vcxproj';                  c='Header';        plat='x64'   ; dep=$true },
+            @{ p='VirtIO/VirtioLib.vcxproj';                c='Win11 Release'; plat='ARM64' ; dep=$true },
+            @{ p='VirtIO/WDF/VirtioLib-WDF.vcxproj';        c='Win11 Release'; plat='ARM64' ; dep=$true },
+            @{ p='NetKVM/CoInstaller/netkvmco-vs2015.vcxproj'; c='Win11 Release'; plat='ARM64' ; dep=$true },
+            @{ p='viostor/viostor.vcxproj';                 c='Win11 Release'; plat='ARM64' },
+            @{ p='vioscsi/vioscsi.vcxproj';                 c='Win11 Release'; plat='ARM64' },
+            @{ p='vioserial/sys/vioser.vcxproj';            c='Win11 Release'; plat='ARM64' },
+            @{ p='viorng/viorng/viorng.vcxproj';            c='Win11 Release'; plat='ARM64' },
+            @{ p='viosock/sys/viosock.vcxproj';             c='Win11 Release'; plat='ARM64' },
+            @{ p='NetKVM/NetKVM-VS2015.vcxproj';            c='Win11 Release'; plat='ARM64' },
+            @{ p='rdmapool/rdmapool.vcxproj';               c='Release';       plat='ARM64' }
+          )
           $failed = @()
-          foreach ($t in $slnTargets) {
-            Write-Host "::group::build sln:$t [Win11 Release|ARM64]"
-            msbuild virtio-win.sln /t:$t /p:Configuration="Win11 Release" @common
-            if ($LASTEXITCODE -ne 0) { $failed += $t }
+          foreach ($j in $jobs) {
+            Write-Host "::group::build $($j.p) [$($j.c)|$($j.plat)]"
+            msbuild $j.p /p:Configuration="$($j.c)" /p:Platform="$($j.plat)" @common
+            if ($LASTEXITCODE -ne 0) {
+              $failed += $j.p
+              if ($j.dep) { Write-Host "::error::dependency $($j.p) failed — 後續驅動可能連不到" }
+            }
             Write-Host "::endgroup::"
           }
-          Write-Host "::group::build rdmapool [Release|ARM64]"
-          msbuild rdmapool/rdmapool.vcxproj /p:Configuration="Release" @common
-          if ($LASTEXITCODE -ne 0) { $failed += 'rdmapool' }
-          Write-Host "::endgroup::"
-          if ($failed.Count) { Write-Host "::warning::Failed targets: $($failed -join ', ')" }
+          if ($failed.Count) { Write-Host "::warning::Failed: $($failed -join ', ')" }
           # 不中止 job；簽署/打包會處理已成功的部分
 
       - name: Self-sign + package
