@@ -310,6 +310,13 @@ RhelDoReadWrite(PVOID DeviceExtension, PSRB_TYPE Srb)
         virtqueue_notify(vq);
     }
 
+    /* Arm the poll fallback so a completion IRQ that the hypervisor drops on an
+     * idle vCPU is still reaped within ~1ms instead of waiting for the watchdog. */
+    if (result)
+    {
+        VioStorArmCompletionPoll(DeviceExtension);
+    }
+
     if (adaptExt->num_queues > 1)
     {
         if (CHECKFLAG(adaptExt->perfFlags, STOR_PERF_OPTIMIZE_FOR_COMPLETION_DURING_STARTIO))

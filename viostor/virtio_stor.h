@@ -98,6 +98,10 @@ typedef struct VirtIOBufferDescriptor VIO_SG, *PVIO_SG;
 
 #define VIOBLK_POOL_TAG                    'BoiV'
 
+/* Completion-poll fallback period, microseconds (worst-case extra latency for a
+ * completion interrupt that the hypervisor failed to deliver to an idle vCPU). */
+#define VIOSTOR_POLL_INTERVAL_US           1000
+
 #pragma pack(1)
 typedef struct virtio_blk_config
 {
@@ -271,6 +275,15 @@ typedef struct _ADAPTER_EXTENSION
     PDEVICE_OBJECT rdmaPoolDeviceObject;
     PFILE_OBJECT rdmaPoolFileObject;
     BOUNCE_ALLOCATOR bounce;
+
+    /* Completion-poll fallback (see VioStorCompletionPoll). Some virtio
+     * completion interrupts are not delivered to an idle vCPU on this
+     * hypervisor, so a request can be reaped only by the ~250ms StorPort
+     * watchdog. A lightweight timer drains the used rings while requests are
+     * outstanding, turning a missed IRQ into ~1ms of extra latency. Adaptive:
+     * armed on submit, self-stops when nothing is in flight. */
+    PVOID completionPollTimer;
+    LONG pollArmed;
 
 #ifdef DBG
     LONG srb_cnt;

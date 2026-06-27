@@ -52,6 +52,7 @@ HW_BUILDIO VirtIoBuildIo;
 HW_DPC_ROUTINE CompleteDpcRoutine;
 HW_MESSAGE_SIGNALED_INTERRUPT_ROUTINE VirtIoMSInterruptRoutine;
 HW_PASSIVE_INITIALIZE_ROUTINE VirtIoPassiveInitializeRoutine;
+HW_TIMER_EX VioStorCompletionPoll;
 
 extern int vring_add_buf_stor(IN struct virtqueue *_vq,
                               IN struct VirtIOBufferDescriptor sg[],
@@ -555,6 +556,16 @@ VirtIoPassiveInitializeRoutine(IN PVOID DeviceExtension)
         StorPortInitializeDpc(DeviceExtension, &adaptExt->dpc[index], CompleteDpcRoutine);
     }
     adaptExt->dpc_ok = TRUE;
+
+    /* One-shot timer used as the completion-poll fallback (re-armed by itself
+     * while requests are outstanding). Failure is non-fatal: completions then
+     * rely solely on interrupts (with the ~250ms watchdog as last resort). */
+    if (adaptExt->completionPollTimer == NULL)
+    {
+        adaptExt->pollArmed = 0;
+        StorPortInitializeTimer(DeviceExtension, &adaptExt->completionPollTimer);
+    }
+
     return TRUE;
 }
 
@@ -2544,6 +2555,85 @@ VOID CompleteDpcRoutine(IN PSTOR_DPC Dpc, IN PVOID Context, IN PVOID SystemArgum
     ULONG MessageID = PtrToUlong(SystemArgument1);
 
     VioStorCompleteRequest(Context, MessageID, FALSE);
+}
+
+/* TRUE if any queue still has requests in flight. Lock-free approximate read of
+ * the per-queue counters; only used to decide whether to keep the poll armed,
+ * so an occasional stale read just costs/saves one extra ~1ms cycle. */
+static BOOLEAN VioStorHasOutstanding(PADAPTER_EXTENSION adaptExt)
+{
+    ULONG i;
+    for (i = 0; i < adaptExt->num_queues; i++)
+    {
+        if (adaptExt->processing_srbs[i].srb_cnt != 0)
+        {
+            return TRUE;
+        }
+    }
+    return FALSE;
+}
+
+VOID VioStorArmCompletionPoll(IN PVOID DeviceExtension)
+{
+    PADAPTER_EXTENSION adaptExt = (PADAPTER_EXTENSION)DeviceExtension;
+
+    if (adaptExt->completionPollTimer == NULL)
+    {
+        return;
+    }
+    /* Schedule only if not already scheduled (the running timer re-arms itself
+     * while work remains). */
+    if (InterlockedCompareExchange(&adaptExt->pollArmed, 1, 0) == 0)
+    {
+        StorPortRequestTimer(DeviceExtension,
+                             adaptExt->completionPollTimer,
+                             VioStorCompletionPoll,
+                             NULL,
+                             VIOSTOR_POLL_INTERVAL_US,
+                             0);
+    }
+}
+
+/*
+ * Completion-poll fallback. Drains every queue's used ring exactly like the
+ * interrupt/DPC path, then re-arms itself while requests remain outstanding.
+ * This bounds the latency of a completion interrupt that the hypervisor failed
+ * to deliver to an idle vCPU to ~VIOSTOR_POLL_INTERVAL_US instead of the
+ * ~250ms StorPort watchdog. It never completes a request the device hasn't
+ * published to the used ring, so it cannot complete I/O early.
+ */
+VOID VioStorCompletionPoll(IN PVOID DeviceExtension, IN PVOID Context)
+{
+    PADAPTER_EXTENSION adaptExt = (PADAPTER_EXTENSION)DeviceExtension;
+    ULONG i;
+
+    UNREFERENCED_PARAMETER(Context);
+
+    for (i = 0; i < adaptExt->num_queues; i++)
+    {
+        VioStorCompleteRequest(DeviceExtension, i + adaptExt->msix_has_config_vector, FALSE);
+    }
+
+    if (VioStorHasOutstanding(adaptExt))
+    {
+        /* Still busy: keep polling (pollArmed stays 1). */
+        StorPortRequestTimer(DeviceExtension,
+                             adaptExt->completionPollTimer,
+                             VioStorCompletionPoll,
+                             NULL,
+                             VIOSTOR_POLL_INTERVAL_US,
+                             0);
+    }
+    else
+    {
+        /* Idle: stop. Re-check after clearing to catch a submit that raced in
+         * between the drain above and the store below. */
+        InterlockedExchange(&adaptExt->pollArmed, 0);
+        if (VioStorHasOutstanding(adaptExt))
+        {
+            VioStorArmCompletionPoll(DeviceExtension);
+        }
+    }
 }
 
 VOID LogError(IN PVOID DeviceExtension, IN ULONG ErrorCode, IN ULONG UniqueId)
