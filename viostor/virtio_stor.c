@@ -2579,7 +2579,16 @@ VOID VioStorArmCompletionPoll(IN PVOID DeviceExtension)
 
     if (adaptExt->completionPollTimer == NULL)
     {
-        return;
+        /* Lazy init as a backstop in case the passive-init routine did not run.
+         * StorPortInitializeTimer is callable at <= DISPATCH. Publish the handle
+         * atomically; if two CPUs race, the loser orphans its timer (one-time,
+         * negligible -- there is no StorPort API to free one). */
+        PVOID timer = NULL;
+        if (StorPortInitializeTimer(DeviceExtension, &timer) != STOR_STATUS_SUCCESS || timer == NULL)
+        {
+            return;
+        }
+        InterlockedCompareExchangePointer(&adaptExt->completionPollTimer, timer, NULL);
     }
     /* Schedule only if not already scheduled (the running timer re-arms itself
      * while work remains). */

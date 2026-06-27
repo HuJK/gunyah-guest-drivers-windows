@@ -206,7 +206,13 @@ RhelDoFlush(PVOID DeviceExtension, PSRB_TYPE Srb, BOOLEAN resend, BOOLEAN bIsr)
     if (virtqueue_add_buf(vq, &srbExt->sg[0], srbExt->out, srbExt->in, (void *)srbExt->id, va, pa) ==
         VQ_ADD_BUFFER_SUCCESS)
     {
-        notify = virtqueue_kick_prepare(vq);
+        /* Always notify the device. virtqueue_kick_prepare may suppress the
+         * kick (EVENT_IDX/avail_event), but on this hypervisor a suppressed
+         * kick can leave the request unstarted on an idle host worker until a
+         * ~250ms watchdog. An unnecessary notify is harmless (one extra vmexit).
+         * Keep kick_prepare for its num_added_since_kick bookkeeping. */
+        virtqueue_kick_prepare(vq);
+        notify = TRUE;
         InsertTailList(&element->srb_list, &srbExt->vbr.list_entry);
         element->srb_cnt++;
         if (!resend)
@@ -289,7 +295,13 @@ RhelDoReadWrite(PVOID DeviceExtension, PSRB_TYPE Srb)
     if (virtqueue_add_buf(vq, &srbExt->sg[0], srbExt->out, srbExt->in, (void *)srbExt->id, va, pa) ==
         VQ_ADD_BUFFER_SUCCESS)
     {
-        notify = virtqueue_kick_prepare(vq);
+        /* Always notify the device. virtqueue_kick_prepare may suppress the
+         * kick (EVENT_IDX/avail_event), but on this hypervisor a suppressed
+         * kick can leave the request unstarted on an idle host worker until a
+         * ~250ms watchdog. An unnecessary notify is harmless (one extra vmexit).
+         * Keep kick_prepare for its num_added_since_kick bookkeeping. */
+        virtqueue_kick_prepare(vq);
+        notify = TRUE;
         InsertTailList(&element->srb_list, &srbExt->vbr.list_entry);
         element->srb_cnt++;
         VioStorVQUnlock(DeviceExtension, MessageId, &LockHandle, FALSE);
@@ -491,7 +503,13 @@ RhelDoUnMap(IN PVOID DeviceExtension, IN PSRB_TYPE Srb)
     if (virtqueue_add_buf(vq, &srbExt->sg[0], srbExt->out, srbExt->in, (void *)srbExt->id, va, pa) ==
         VQ_ADD_BUFFER_SUCCESS)
     {
-        notify = virtqueue_kick_prepare(vq);
+        /* Always notify the device. virtqueue_kick_prepare may suppress the
+         * kick (EVENT_IDX/avail_event), but on this hypervisor a suppressed
+         * kick can leave the request unstarted on an idle host worker until a
+         * ~250ms watchdog. An unnecessary notify is harmless (one extra vmexit).
+         * Keep kick_prepare for its num_added_since_kick bookkeeping. */
+        virtqueue_kick_prepare(vq);
+        notify = TRUE;
         InsertTailList(&element->srb_list, &srbExt->vbr.list_entry);
         element->srb_cnt++;
         VioStorVQUnlock(DeviceExtension, MessageId, &LockHandle, FALSE);
@@ -614,7 +632,13 @@ RhelGetSerialNumber(IN PVOID DeviceExtension, IN PSRB_TYPE Srb)
     if (virtqueue_add_buf(vq, &srbExt->sg[0], srbExt->out, srbExt->in, (void *)srbExt->id, va, pa) ==
         VQ_ADD_BUFFER_SUCCESS)
     {
-        notify = virtqueue_kick_prepare(vq);
+        /* Always notify the device. virtqueue_kick_prepare may suppress the
+         * kick (EVENT_IDX/avail_event), but on this hypervisor a suppressed
+         * kick can leave the request unstarted on an idle host worker until a
+         * ~250ms watchdog. An unnecessary notify is harmless (one extra vmexit).
+         * Keep kick_prepare for its num_added_since_kick bookkeeping. */
+        virtqueue_kick_prepare(vq);
+        notify = TRUE;
         InsertTailList(&element->srb_list, &srbExt->vbr.list_entry);
         element->srb_cnt++;
         VioStorVQUnlock(DeviceExtension, MessageId, &LockHandle, FALSE);
