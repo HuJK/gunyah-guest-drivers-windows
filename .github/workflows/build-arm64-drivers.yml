@@ -60,14 +60,18 @@ jobs:
         run: |
           # 逐 vcxproj 建，先按相依順序建 deps（msbuild sln /t:proj 不可靠，會把名稱當 target）：
           #   Mof(產 netkvmmof.h) -> VirtioLib / VirtioLib-WDF -> CoInstaller -> 各驅動 -> rdmapool
-          # Driver 版號 = 100.6.102.<commit數>。第三段 101->102 確保永遠比現役 100.6.101.* 新；
-          # 第四段用 commit 數，每次 commit 單調遞增（16-bit 上限 65535，餘裕約 6 萬）。
-          # 對未用 Driver.RHEL.props 的專案（如 rdmapool）這兩個 /p: 是未使用屬性，無副作用。
-          $commitCount = (& git rev-list --count HEAD | Out-String).Trim()
-          if (-not ($commitCount -match '^[0-9]+$')) { $commitCount = '0' }
-          Write-Host "Driver version = 100.6.102.$commitCount"
+          # Driver 版號 = 100.6.101.<58000 + 自 versioning epoch 起的 commit 數>。
+          # 維持第三段 101，第四段從 58000 往上長（每 commit +1），epoch 之後第一個 build = 58001，
+          # 故永遠 > 現役 100.6.101.58000。16-bit 上限 65535 → 約 7500 次 build 餘裕；接近上限再開新 epoch。
+          # 對未用 Driver.RHEL.props 的專案（如 rdmapool）此 /p: 是未使用屬性，無副作用。
+          $epoch = 'd6387a03'   # versioning epoch：此 commit 之後每個 commit 讓第四段 +1
+          $n = (& git rev-list --count "$epoch..HEAD" | Out-String).Trim()
+          if (-not ($n -match '^[0-9]+$')) { $n = '0' }
+          $minor = 58000 + [int]$n
+          if ($minor -gt 65535) { Write-Host "::warning::driver minor $minor 超過 65535，請開新 epoch 或 bump 第三段"; $minor = 65535 }
+          Write-Host "Driver version = 100.6.101.$minor"
           $common = @('/m','/p:ApiValidator_Enable=false','/p:SpectreMitigation=false','/p:SignMode=Off',
-                      '/p:_BUILD_MAJOR_VERSION_=102', "/p:_BUILD_MINOR_VERSION_=$commitCount")
+                      "/p:_BUILD_MINOR_VERSION_=$minor")
           $jobs = @(
             @{ p='NetKVM/Mof/Mof.vcxproj';                  c='Header';        plat='x64'   ; dep=$true },
             @{ p='VirtIO/VirtioLib.vcxproj';                c='Win11 Release'; plat='ARM64' ; dep=$true },
