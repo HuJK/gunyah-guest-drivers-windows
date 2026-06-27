@@ -2372,6 +2372,39 @@ UCHAR DeviceToSrbStatus(UCHAR status)
     return SRB_STATUS_ERROR;
 }
 
+static VOID CompleteReadWriteRequestUnlocked(IN PVOID DeviceExtension, IN PSRB_TYPE Srb)
+{
+    PADAPTER_EXTENSION adaptExt = (PADAPTER_EXTENSION)DeviceExtension;
+    PSRB_EXTENSION srbExt = SRB_EXTENSION(Srb);
+    UCHAR srbStatus;
+
+    if (srbExt->bounceCtl)
+    {
+        if (srbExt->vbr.out_hdr.type == VIRTIO_BLK_T_IN && srbExt->originalDataVA != NULL &&
+            srbExt->bounceDataChunkCount > 0)
+        {
+            SIZE_T offset = 0;
+            ULONG bIdx;
+
+            for (bIdx = 1; bIdx <= srbExt->bounceDataChunkCount; bIdx++)
+            {
+                PVOID srcVA = BouncePAtoVA(&adaptExt->bounce, srbExt->sg[bIdx].physAddr);
+                RtlCopyMemory((PUCHAR)srbExt->originalDataVA + offset, srcVA, srbExt->sg[bIdx].length);
+                offset += srbExt->sg[bIdx].length;
+            }
+        }
+
+        BOUNCE_CLEANUP_SRB(adaptExt, srbExt);
+    }
+
+    srbStatus = DeviceToSrbStatus(srbExt->vbr.status);
+    RhelDbgPrint(TRACE_LEVEL_VERBOSE,
+                 " srb %p, QueueNumber %lu.\n",
+                 Srb,
+                 srbExt->queue_number);
+    CompleteRequestWithStatus(DeviceExtension, Srb, srbStatus);
+}
+
 VOID VioStorCompleteRequest(IN PVOID DeviceExtension, IN ULONG MessageID, IN BOOLEAN bIsr)
 {
     unsigned int len = 0;
@@ -2384,8 +2417,12 @@ VOID VioStorCompleteRequest(IN PVOID DeviceExtension, IN ULONG MessageID, IN BOO
     PSRB_EXTENSION srbExt = NULL;
     UCHAR srbStatus = SRB_STATUS_SUCCESS;
     PREQUEST_LIST element = NULL;
+    LIST_ENTRY completeList;
+    PLIST_ENTRY completeEntry;
 
     RhelDbgPrint(TRACE_LEVEL_VERBOSE, " ---> MessageID 0x%x\n", MessageID);
+
+    InitializeListHead(&completeList);
 
     VioStorVQLock(DeviceExtension, MessageID, &queueLock, bIsr);
 
@@ -2498,27 +2535,12 @@ VOID VioStorCompleteRequest(IN PVOID DeviceExtension, IN ULONG MessageID, IN BOO
             }
             if (bFound && Srb)
             {
-                /* Bounce cleanup: copy status and read data back, free bounce buffers */
+                /* Copy the tiny device-written status under the queue lock, but
+                 * defer large read copy-back and request completion until after
+                 * the lock is released. */
                 if (srbExt->bounceCtl)
                 {
-                    /* Copy device-written status from bounce */
                     srbExt->vbr.status = *((u8 *)((PUCHAR)srbExt->bounceCtl + BOUNCE_CTL_STATUS_OFFSET));
-
-                    /* For reads: copy data from bounce pages back to original buffer */
-                    if (srbExt->vbr.out_hdr.type == VIRTIO_BLK_T_IN && srbExt->originalDataVA != NULL &&
-                        srbExt->bounceDataChunkCount > 0)
-                    {
-                        SIZE_T offset = 0;
-                        ULONG bIdx;
-                        for (bIdx = 1; bIdx <= srbExt->bounceDataChunkCount; bIdx++)
-                        {
-                            PVOID srcVA = BouncePAtoVA(&adaptExt->bounce, srbExt->sg[bIdx].physAddr);
-                            RtlCopyMemory((PUCHAR)srbExt->originalDataVA + offset, srcVA, srbExt->sg[bIdx].length);
-                            offset += srbExt->sg[bIdx].length;
-                        }
-                    }
-
-                    BOUNCE_CLEANUP_SRB(adaptExt, srbExt);
                 }
 
                 srbStatus = DeviceToSrbStatus(srbExt->vbr.status);
@@ -2538,13 +2560,23 @@ VOID VioStorCompleteRequest(IN PVOID DeviceExtension, IN ULONG MessageID, IN BOO
                 }
                 else
                 {
-                    CompleteRequestWithStatus(DeviceExtension, (PSRB_TYPE)Srb, srbStatus);
+                    InsertTailList(&completeList, &srbExt->vbr.list_entry);
                 }
             }
         }
     } while (!virtqueue_enable_cb(vq));
 
     VioStorVQUnlock(DeviceExtension, MessageID, &queueLock, bIsr);
+
+    while (!IsListEmpty(&completeList))
+    {
+        pblk_req req;
+
+        completeEntry = RemoveHeadList(&completeList);
+        req = CONTAINING_RECORD(completeEntry, blk_req, list_entry);
+        Srb = (PSRB_TYPE)req->req;
+        CompleteReadWriteRequestUnlocked(DeviceExtension, Srb);
+    }
 
     RhelDbgPrint(TRACE_LEVEL_VERBOSE, " <--- MessageID 0x%x\n", MessageID);
 }
