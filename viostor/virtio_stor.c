@@ -234,8 +234,7 @@ static BOOLEAN VioStorPrepareSplitReadWrite(IN PVOID DeviceExtension, IN PSRB_TY
     ULONG sysAddrStatus;
 
     if (!adaptExt->rdmaPoolActive || !adaptExt->bounce.Initialized || totalDataLen <= VIOSTOR_MAX_TRANSFER_LENGTH_CAP ||
-        totalDataLen > (VIOSTOR_SPLIT_CHILD_LENGTH * VIOSTOR_SPLIT_MAX_CHILDREN) ||
-        (totalDataLen & (SECTOR_SIZE - 1)) != 0)
+        totalDataLen > VIOSTOR_SPLIT_MAX_TRANSFER_LENGTH || (totalDataLen & (SECTOR_SIZE - 1)) != 0)
     {
         return FALSE;
     }
@@ -1964,7 +1963,7 @@ VirtIoBuildIo(IN PVOID DeviceExtension, IN PSCSI_REQUEST_BLOCK Srb)
 
     if (adaptExt->rdmaPoolActive && adaptExt->bounce.Initialized &&
         SRB_DATA_TRANSFER_LENGTH(Srb) > VIOSTOR_MAX_TRANSFER_LENGTH_CAP &&
-        SRB_DATA_TRANSFER_LENGTH(Srb) <= (VIOSTOR_SPLIT_CHILD_LENGTH * VIOSTOR_SPLIT_MAX_CHILDREN) &&
+        SRB_DATA_TRANSFER_LENGTH(Srb) <= VIOSTOR_SPLIT_MAX_TRANSFER_LENGTH &&
         (SRB_DATA_TRANSFER_LENGTH(Srb) & (SECTOR_SIZE - 1)) == 0)
     {
         return VioStorPrepareSplitReadWrite(DeviceExtension, (PSRB_TYPE)Srb, lba);

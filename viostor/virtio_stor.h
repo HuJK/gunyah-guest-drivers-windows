@@ -99,7 +99,8 @@ typedef struct VirtIOBufferDescriptor VIO_SG, *PVIO_SG;
 /* Keep advertised SRB transfers below the 1MiB boundary where DroidVM's
  * restricted-DMA virtio-blk path can fall back to watchdog-paced completion. */
 #define VIOSTOR_MAX_TRANSFER_LENGTH_CAP    (960 * 1024)
-#define VIOSTOR_SPLIT_CHILD_LENGTH         (512 * 1024)
+#define VIOSTOR_SPLIT_CHILD_LENGTH         VIOSTOR_MAX_TRANSFER_LENGTH_CAP
+#define VIOSTOR_SPLIT_MAX_TRANSFER_LENGTH  (1024 * 1024)
 #define VIOSTOR_SPLIT_MAX_CHILDREN         2
 #define VIOSTOR_SPLIT_MAX_SG               ((VIOSTOR_SPLIT_CHILD_LENGTH / PAGE_SIZE) + 2)
 
