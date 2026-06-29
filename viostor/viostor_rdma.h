@@ -52,10 +52,8 @@
  * burned only during active I/O, never blocking StartIo); when idle it blocks on
  * the wake event with a safety-net timeout (≈0 CPU).
  */
-#define VIOSTOR_POLL_SPIN_US       10  /* tight stall after a productive drain */
-#define VIOSTOR_POLL_BACKOFF_MAX_US 500 /* max stall after empty drains (frees the
-                                         * queue lock so StartIo can fill the QD) */
-#define VIOSTOR_POLL_IDLE_MS       100  /* idle safety-net wakeup */
+#define VIOSTOR_POLL_SPIN_US       10  /* stall between drains while busy */
+#define VIOSTOR_POLL_IDLE_MS       100 /* idle safety-net wakeup */
 
 typedef struct _BOUNCE_ALLOCATOR
 {
@@ -126,9 +124,5 @@ NTSTATUS VioStorStartPollThread(PVOID DeviceExtension);
 VOID VioStorStopPollThread(PVOID DeviceExtension);
 /* Wake the poll thread after submitting work (any IRQL). */
 VOID VioStorPollKick(PVOID DeviceExtension);
-
-/* DIAG: emit the contention counters (isr/poll reaped, drains, max outstanding)
- * to the System event log; read via Get-WinEvent (ErrorCode tag 0xD1A60002). */
-VOID VioStorContentionLog(PVOID DeviceExtension);
 
 #endif /* _VIOSTOR_RDMA_H_ */

@@ -482,45 +482,10 @@ static BOOLEAN VioStorAnyOutstanding(PADAPTER_EXTENSION adaptExt)
     return FALSE;
 }
 
-/* Sum of in-flight requests across queues = effective device queue depth. */
-static LONG VioStorSumOutstanding(PADAPTER_EXTENSION adaptExt)
-{
-    LONG sum = 0;
-    ULONG q;
-    for (q = 0; q < adaptExt->num_queues; q++)
-    {
-        sum += (LONG)adaptExt->processing_srbs[q].srb_cnt;
-    }
-    return sum;
-}
-
-VOID VioStorContentionLog(PVOID DeviceExtension)
-{
-    PADAPTER_EXTENSION adaptExt = (PADAPTER_EXTENSION)DeviceExtension;
-    STOR_LOG_EVENT_DETAILS logEvent;
-    ULONG dump[4];
-
-    dump[0] = (ULONG)adaptExt->dbgIsrReaped;
-    dump[1] = (ULONG)adaptExt->dbgPollReaped;
-    dump[2] = (ULONG)adaptExt->dbgPollDrains;
-    dump[3] = (ULONG)adaptExt->dbgMaxOutstanding;
-
-    RtlZeroMemory(&logEvent, sizeof(logEvent));
-    logEvent.InterfaceRevision = STOR_CURRENT_LOG_INTERFACE_REVISION;
-    logEvent.Size = sizeof(logEvent);
-    logEvent.EventAssociation = StorEventAdapterAssociation;
-    logEvent.StorportSpecificErrorCode = TRUE;
-    logEvent.ErrorCode = 0xD1A60002;
-    logEvent.DumpDataSize = sizeof(dump);
-    logEvent.DumpData = dump;
-    StorPortLogSystemEvent(DeviceExtension, &logEvent, NULL);
-}
-
 static VOID VioStorPollThreadRoutine(PVOID Context)
 {
     PADAPTER_EXTENSION adaptExt = (PADAPTER_EXTENSION)Context;
     LARGE_INTEGER idleTick;
-    ULONG stallUs = VIOSTOR_POLL_SPIN_US; /* adaptive stall between drains */
 
     /* Negative = relative, 100ns units. */
     idleTick.QuadPart = -(LONGLONG)(10 * 1000 * VIOSTOR_POLL_IDLE_MS);
@@ -537,52 +502,19 @@ static VOID VioStorPollThreadRoutine(PVOID Context)
         if (VioStorAnyOutstanding(adaptExt))
         {
             /*
-             * Busy: spin-drain for low latency (high random IOPS). This burns the
-             * dedicated poll thread's CPU only while I/O is in flight and never
-             * blocks StartIo, so queue-depth concurrency is preserved (unlike the
-             * old inline busy-poll). The short stall between drains is at
-             * PASSIVE_LEVEL with the queue lock released, letting submits and the
-             * ISR make progress.
+             * Busy: tight spin-drain for low latency. Burns this dedicated thread's
+             * CPU only while I/O is in flight and never blocks StartIo, so queue
+             * depth is preserved (unlike the old inline busy-poll). The short stall
+             * between drains releases the queue lock so submits/ISR make progress.
+             * (Uncached small random I/O is per-request-rate bound ~11k IOPS — the
+             * single-queue bounce round-trip floor, not lock contention; cached 4K
+             * random reaches ~78k IOPS / 307 MB/s.)
              */
-            LONG out = VioStorSumOutstanding(adaptExt); /* DIAG: effective device QD */
-            LONG drains;
-            if (out > adaptExt->dbgMaxOutstanding)
-            {
-                adaptExt->dbgMaxOutstanding = out;
-            }
-            LONG before;
-            drains = InterlockedIncrement(&adaptExt->dbgPollDrains);
-            if ((drains % 50000) == 0)
-            {
-                VioStorContentionLog(adaptExt);
-            }
-
-            before = adaptExt->dbgPollReaped;
             for (q = 0; q < adaptExt->num_queues; q++)
             {
                 VioStorCompleteRequest(adaptExt, q + adaptExt->msix_has_config_vector, FALSE);
             }
-
-            /*
-             * Adaptive back-off: a productive drain means completions are flowing,
-             * so keep polling tight for low latency. An empty drain means we are
-             * just spinning on the queue lock and starving StartIo (the QD-32 case
-             * collapsed the effective device queue to ~3), so exponentially back off
-             * the stall to hand the lock back to StartIo and let it fill the queue.
-             */
-            if (adaptExt->dbgPollReaped != before)
-            {
-                stallUs = VIOSTOR_POLL_SPIN_US;
-            }
-            else if (stallUs < VIOSTOR_POLL_BACKOFF_MAX_US)
-            {
-                stallUs <<= 1;
-                if (stallUs > VIOSTOR_POLL_BACKOFF_MAX_US)
-                {
-                    stallUs = VIOSTOR_POLL_BACKOFF_MAX_US;
-                }
-            }
-            KeStallExecutionProcessor(stallUs);
+            KeStallExecutionProcessor(VIOSTOR_POLL_SPIN_US);
         }
         else
         {
