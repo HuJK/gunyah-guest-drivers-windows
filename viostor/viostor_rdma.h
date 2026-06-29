@@ -46,8 +46,14 @@
  */
 #define BOUNCE_DATA_CHUNK_SIZE  (256 * 1024)
 
-/* Poll thread cadence: drain the used rings this often while I/O is outstanding. */
-#define VIOSTOR_POLL_INTERVAL_US 1000
+/*
+ * Poll thread cadence. Adaptive: while I/O is in flight the thread spin-drains
+ * with a short stall between drains (low latency -> high random IOPS, ~1 core
+ * burned only during active I/O, never blocking StartIo); when idle it blocks on
+ * the wake event with a safety-net timeout (≈0 CPU).
+ */
+#define VIOSTOR_POLL_SPIN_US     10   /* stall between drains while busy */
+#define VIOSTOR_POLL_IDLE_MS     100  /* idle safety-net wakeup */
 
 typedef struct _BOUNCE_ALLOCATOR
 {

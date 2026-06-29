@@ -485,34 +485,44 @@ static BOOLEAN VioStorAnyOutstanding(PADAPTER_EXTENSION adaptExt)
 static VOID VioStorPollThreadRoutine(PVOID Context)
 {
     PADAPTER_EXTENSION adaptExt = (PADAPTER_EXTENSION)Context;
-    LARGE_INTEGER tick;
     LARGE_INTEGER idleTick;
 
-    /* Negative = relative; 100ns units. Busy cadence ~1ms; idle safety-net 100ms
-     * (so a submit whose kick is ever missed still completes promptly without
-     * keeping the CPU busy). */
-    tick.QuadPart = -(LONGLONG)(10 * VIOSTOR_POLL_INTERVAL_US);
-    idleTick.QuadPart = -(LONGLONG)(10 * 1000 * 100);
+    /* Negative = relative, 100ns units. */
+    idleTick.QuadPart = -(LONGLONG)(10 * 1000 * VIOSTOR_POLL_IDLE_MS);
 
     for (;;)
     {
-        BOOLEAN outstanding = VioStorAnyOutstanding(adaptExt);
         ULONG q;
-
-        (void)KeWaitForSingleObject(&adaptExt->pollWake,
-                                    Executive,
-                                    KernelMode,
-                                    FALSE,
-                                    outstanding ? &tick : &idleTick);
 
         if (InterlockedCompareExchange(&adaptExt->pollStop, 0, 0) != 0)
         {
             break;
         }
 
-        for (q = 0; q < adaptExt->num_queues; q++)
+        if (VioStorAnyOutstanding(adaptExt))
         {
-            VioStorCompleteRequest(adaptExt, q + adaptExt->msix_has_config_vector, FALSE);
+            /*
+             * Busy: spin-drain for low latency (high random IOPS). This burns the
+             * dedicated poll thread's CPU only while I/O is in flight and never
+             * blocks StartIo, so queue-depth concurrency is preserved (unlike the
+             * old inline busy-poll). The short stall between drains is at
+             * PASSIVE_LEVEL with the queue lock released, letting submits and the
+             * ISR make progress.
+             */
+            for (q = 0; q < adaptExt->num_queues; q++)
+            {
+                VioStorCompleteRequest(adaptExt, q + adaptExt->msix_has_config_vector, FALSE);
+            }
+            KeStallExecutionProcessor(VIOSTOR_POLL_SPIN_US);
+        }
+        else
+        {
+            /* Idle: block until a submit kicks us (safety-net timeout). ~0 CPU. */
+            (void)KeWaitForSingleObject(&adaptExt->pollWake, Executive, KernelMode, FALSE, &idleTick);
+            for (q = 0; q < adaptExt->num_queues; q++)
+            {
+                VioStorCompleteRequest(adaptExt, q + adaptExt->msix_has_config_vector, FALSE);
+            }
         }
     }
 
@@ -568,7 +578,9 @@ NTSTATUS VioStorStartPollThread(PVOID DeviceExtension)
         return status;
     }
 
-    DbgPrint(" poll: thread started (interval %uus)\n", VIOSTOR_POLL_INTERVAL_US);
+    DbgPrint(" poll: thread started (adaptive: spin %uus busy / %ums idle)\n",
+             VIOSTOR_POLL_SPIN_US,
+             VIOSTOR_POLL_IDLE_MS);
     return STATUS_SUCCESS;
 }
 
