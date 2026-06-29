@@ -520,6 +520,7 @@ static VOID VioStorPollThreadRoutine(PVOID Context)
 {
     PADAPTER_EXTENSION adaptExt = (PADAPTER_EXTENSION)Context;
     LARGE_INTEGER idleTick;
+    ULONG stallUs = VIOSTOR_POLL_SPIN_US; /* adaptive stall between drains */
 
     /* Negative = relative, 100ns units. */
     idleTick.QuadPart = -(LONGLONG)(10 * 1000 * VIOSTOR_POLL_IDLE_MS);
@@ -549,16 +550,39 @@ static VOID VioStorPollThreadRoutine(PVOID Context)
             {
                 adaptExt->dbgMaxOutstanding = out;
             }
+            LONG before;
             drains = InterlockedIncrement(&adaptExt->dbgPollDrains);
             if ((drains % 50000) == 0)
             {
                 VioStorContentionLog(adaptExt);
             }
+
+            before = adaptExt->dbgPollReaped;
             for (q = 0; q < adaptExt->num_queues; q++)
             {
                 VioStorCompleteRequest(adaptExt, q + adaptExt->msix_has_config_vector, FALSE);
             }
-            KeStallExecutionProcessor(VIOSTOR_POLL_SPIN_US);
+
+            /*
+             * Adaptive back-off: a productive drain means completions are flowing,
+             * so keep polling tight for low latency. An empty drain means we are
+             * just spinning on the queue lock and starving StartIo (the QD-32 case
+             * collapsed the effective device queue to ~3), so exponentially back off
+             * the stall to hand the lock back to StartIo and let it fill the queue.
+             */
+            if (adaptExt->dbgPollReaped != before)
+            {
+                stallUs = VIOSTOR_POLL_SPIN_US;
+            }
+            else if (stallUs < VIOSTOR_POLL_BACKOFF_MAX_US)
+            {
+                stallUs <<= 1;
+                if (stallUs > VIOSTOR_POLL_BACKOFF_MAX_US)
+                {
+                    stallUs = VIOSTOR_POLL_BACKOFF_MAX_US;
+                }
+            }
+            KeStallExecutionProcessor(stallUs);
         }
         else
         {
