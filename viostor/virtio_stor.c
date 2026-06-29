@@ -73,6 +73,8 @@ VOID CompleteDpcRoutine(IN PSTOR_DPC Dpc, IN PVOID Context, IN PVOID SystemArgum
 BOOLEAN
 VirtIoMSInterruptRoutine(IN PVOID DeviceExtension, IN ULONG MessageID);
 
+VOID VioStorDiagLog(IN PVOID DeviceExtension);
+
 BOOLEAN
 VirtIoStartIo(IN PVOID DeviceExtension, IN PSCSI_REQUEST_BLOCK Srb);
 
@@ -2904,6 +2906,8 @@ VOID VioStorCompleteRequest(IN PVOID DeviceExtension, IN ULONG MessageID, IN BOO
                      adaptExt->dbgCompletedIsr,
                      adaptExt->dbgPollCalls,
                      adaptExt->dbgSubmitPollCalls);
+            /* Also emit to the System event log so it's readable over SSH. */
+            VioStorDiagLog(DeviceExtension);
         }
     }
 
@@ -3082,6 +3086,36 @@ VOID LogError(IN PVOID DeviceExtension, IN ULONG ErrorCode, IN ULONG UniqueId)
     logEvent.ErrorCode = ErrorCode;
     logEvent.DumpDataSize = sizeof(UniqueId);
     logEvent.DumpData = &UniqueId;
+    StorPortLogSystemEvent(DeviceExtension, &logEvent, NULL);
+}
+
+/* DIAG: emit the ISR/completion counters to the System event log so they can be
+ * read over SSH (Get-WinEvent), since DbgPrint only reaches DebugView on the
+ * interactive desktop. ErrorCode 0xD1A60001 is the find tag. DumpData carries
+ * [isrCalls, completedTotal, completedInIsr, pollFirings, submitPolls]. Decisive
+ * read: isrCalls grows ~with completedTotal => the INTx ISR IS being delivered
+ * (latency/wake problem); isrCalls stays flat while completedTotal climbs => the
+ * ISR never runs => SPI 38 is NOT delivered to Windows (firmware/ACPI wiring). */
+VOID VioStorDiagLog(IN PVOID DeviceExtension)
+{
+    PADAPTER_EXTENSION adaptExt = (PADAPTER_EXTENSION)DeviceExtension;
+    STOR_LOG_EVENT_DETAILS logEvent;
+    ULONG dump[5];
+
+    dump[0] = (ULONG)adaptExt->dbgIsrCalls;
+    dump[1] = (ULONG)adaptExt->dbgCompletedTotal;
+    dump[2] = (ULONG)adaptExt->dbgCompletedIsr;
+    dump[3] = (ULONG)adaptExt->dbgPollCalls;
+    dump[4] = (ULONG)adaptExt->dbgSubmitPollCalls;
+
+    memset(&logEvent, 0, sizeof(logEvent));
+    logEvent.InterfaceRevision = STOR_CURRENT_LOG_INTERFACE_REVISION;
+    logEvent.Size = sizeof(logEvent);
+    logEvent.EventAssociation = StorEventAdapterAssociation;
+    logEvent.StorportSpecificErrorCode = TRUE;
+    logEvent.ErrorCode = 0xD1A60001;
+    logEvent.DumpDataSize = sizeof(dump);
+    logEvent.DumpData = dump;
     StorPortLogSystemEvent(DeviceExtension, &logEvent, NULL);
 }
 
