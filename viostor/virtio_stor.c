@@ -600,13 +600,17 @@ VirtIoPassiveInitializeRoutine(IN PVOID DeviceExtension)
             return FALSE;
         }
         /* The bounce allocator above is required on the rdmapool path regardless of
-         * how completions are reaped. The poll thread is separable, and DEFAULT OFF:
-         * with INTx wired (MSISupported=0) completions arrive via the ISR/DPC, so the
-         * busy-spin is redundant and only pegs a host pCPU. Run interrupt-only by
-         * default; the registry value DisableCompletionPoll (Services\viostor\
-         * Parameters) can override -- set it to 0 to bring the busy-poll thread back
-         * as a fallback if the interrupt path proves insufficient. */
-        adaptExt->disablePoll = 1;
+         * how completions are reaped. Completion strategy (workaround default): run the
+         * poll thread ON, but as a GENTLE periodic poll -- it sleeps PollIntervalUs
+         * (default 1ms) between drains instead of the old tight busy-spin, so it reaps
+         * completions within ~1ms (no 250ms StorPort-watchdog stall that capped INTx at
+         * ~5MB/s) at low CPU cost, and it blocks entirely when no I/O is outstanding.
+         * The ISR/DPC path (INTx, MSISupported=0) stays wired too. Registry overrides
+         * (Services\viostor\Parameters): PollIntervalUs = us between drains (0 => tight
+         * spin, max IOPS); DisableCompletionPoll=1 => interrupt-only (no poll thread). */
+        adaptExt->pollIntervalUs = VIOSTOR_POLL_INTERVAL_US;
+        VioStorReadRegistryDword(DeviceExtension, (PUCHAR) "PollIntervalUs", &adaptExt->pollIntervalUs);
+        adaptExt->disablePoll = 0;
         VioStorReadRegistryDword(DeviceExtension, (PUCHAR) "DisableCompletionPoll", &adaptExt->disablePoll);
         if (adaptExt->disablePoll)
         {

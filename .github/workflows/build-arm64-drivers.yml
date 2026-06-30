@@ -66,7 +66,7 @@ jobs:
           # 對未用 Driver.RHEL.props 的專案（如 rdmapool）此 /p: 是未使用屬性，無副作用。
           # versioning epoch = base commit. 開關：設為空字串 '' 或 $null 即關閉自增，
           # 第四段固定落回 58000（相當於 +0）。設為某個 commit 時，其後每個 commit +1。
-          $epoch = ''   # DISABLED：空/None => +0 => 100.6.101.58000
+          $epoch = '3531c11d9c49ad6fe7d39137a1cd84bcdd46c5df'   # base = "ci: ARM64 DroidVM driver build"; +1 per commit after it (out-ranks installed 58000)
           if ([string]::IsNullOrWhiteSpace($epoch)) {
               $n = '0'
           } else {
