@@ -40,7 +40,7 @@
 #include "virtio.h"
 #include "virtio_ring.h"
 #include "virtio_stor_utils.h"
-#include "viostor_rdma.h"
+#include "viostor_bounce.h"
 
 typedef struct VirtIOBufferDescriptor VIO_SG, *PVIO_SG;
 
@@ -96,7 +96,19 @@ typedef struct VirtIOBufferDescriptor VIO_SG, *PVIO_SG;
 #define MAX_PHYS_SEGMENTS                  512
 #define VIRTIO_MAX_SG                      (3 + MAX_PHYS_SEGMENTS)
 
+/* Keep advertised SRB transfers below the 1MiB boundary where DroidVM's
+ * restricted-DMA virtio-blk path can fall back to watchdog-paced completion. */
+#define VIOSTOR_MAX_TRANSFER_LENGTH_CAP    (960 * 1024)
+#define VIOSTOR_SPLIT_CHILD_LENGTH         VIOSTOR_MAX_TRANSFER_LENGTH_CAP
+#define VIOSTOR_SPLIT_MAX_TRANSFER_LENGTH  (1024 * 1024)
+#define VIOSTOR_SPLIT_MAX_CHILDREN         2
+#define VIOSTOR_SPLIT_MAX_SG               ((VIOSTOR_SPLIT_CHILD_LENGTH / PAGE_SIZE) + 2)
+
 #define VIOBLK_POOL_TAG                    'BoiV'
+
+/* Completion-poll fallback period, microseconds (worst-case extra latency for a
+ * completion interrupt that the hypervisor failed to deliver to an idle vCPU). */
+#define VIOSTOR_POLL_INTERVAL_US           1000
 
 #pragma pack(1)
 typedef struct virtio_blk_config
@@ -186,6 +198,7 @@ typedef struct virtio_blk_req
 {
     LIST_ENTRY list_entry;
     PVOID req;
+    ULONG_PTR id;
     blk_outhdr out_hdr;
     u8 status;
 } blk_req, *pblk_req;
@@ -263,25 +276,24 @@ typedef struct _ADAPTER_EXTENSION
     ULONG reset_in_progress_count;
     ULONGLONG fw_ver;
 
-    /* Restricted DMA pool (Gunyah protected VM). When rdmaPoolActive, vrings and
-     * all device-visible I/O staging live in this contiguous pool region; see
-     * viostor_rdma.c. */
+    /* Restricted DMA pool support */
     BOOLEAN rdmaPoolActive;
-    PDEVICE_OBJECT rdmaPoolDeviceObject;
-    PFILE_OBJECT rdmaPoolFileObject;
     PVOID rdmaPoolBaseVA;
     PHYSICAL_ADDRESS rdmaPoolBasePA;
     ULONG64 rdmaPoolSize;
+    PDEVICE_OBJECT rdmaPoolDeviceObject;
+    PFILE_OBJECT rdmaPoolFileObject;
     BOUNCE_ALLOCATOR bounce;
 
-    /* Completion poll thread (replaces inline busy-poll). */
-    PVOID pollThread;       /* PKTHREAD referenced object */
-    KEVENT pollWake;        /* signalled by submit path / kick */
-    volatile LONG pollStop; /* set to 1 to ask the thread to exit */
-    ULONG disablePoll;      /* registry DisableCompletionPoll: 1 => ISR/DPC only */
-    ULONG pollIntervalUs;   /* registry PollIntervalUs: sleep this many us between drains
-                             * while I/O is outstanding (default 1000 = 1ms gentle poll);
-                             * 0 => tight KeStallExecutionProcessor spin (max IOPS) */
+    /* Completion-poll fallback (see VioStorCompletionPoll). Some virtio
+     * completion interrupts are not delivered to an idle vCPU on this
+     * hypervisor, so a request can be reaped only by the ~250ms StorPort
+     * watchdog. A lightweight timer drains the used rings while requests are
+     * outstanding, turning a missed IRQ into ~1ms of extra latency. Adaptive:
+     * armed on submit, self-stops when nothing is in flight. */
+    PVOID completionPollTimer;
+    LONG pollArmed;
+
 #ifdef DBG
     LONG srb_cnt;
     LONG inqueue_cnt;
@@ -296,6 +308,19 @@ typedef struct _VRING_DESC_ALIAS
     } u;
 } VRING_DESC_ALIAS;
 
+typedef struct _VIOSTOR_SPLIT_CHILD
+{
+    blk_req vbr;
+    ULONG out;
+    ULONG in;
+    VIO_SG sg[VIOSTOR_SPLIT_MAX_SG];
+    PVOID bounceCtl;
+    PVOID originalDataVA;
+    ULONG bounceDataChunkCount;
+    ULONG dataOffset;
+    ULONG dataLength;
+} VIOSTOR_SPLIT_CHILD, *PVIOSTOR_SPLIT_CHILD;
+
 typedef struct _SRB_EXTENSION
 {
     blk_req vbr;
@@ -307,12 +332,15 @@ typedef struct _SRB_EXTENSION
     VIO_SG sg[VIRTIO_MAX_SG];
     VRING_DESC_ALIAS desc[VIRTIO_MAX_SG];
     blk_discard_write_zeroes blk_discard[MAX_DISCARD_SEGMENTS];
-
-    /* Bounce staging for the restricted DMA pool path (viostor_rdma.c). */
-    PVOID bounceCtl;        /* control slot (out_hdr + status) VA, or NULL */
-    ULONG bounceChunkCount; /* number of data chunks in sg[1..count] */
-    PUCHAR srbDataVA;       /* system VA of the original SRB data buffer */
-    ULONG srbDataLen;       /* bytes of I/O data */
+    /* Bounce buffer tracking (rdmapool) */
+    PVOID bounceCtl;            /* Control slot VA in rdmapool, NULL if not bouncing */
+    PVOID originalDataVA;       /* Original data buffer VA for read copy-back */
+    ULONG bounceDataChunkCount; /* Number of contiguous data chunks allocated from bounce pool */
+    BOOLEAN split;
+    ULONG splitChildCount;
+    LONG splitRemaining;
+    LONG splitStatus;
+    VIOSTOR_SPLIT_CHILD splitChildren[VIOSTOR_SPLIT_MAX_CHILDREN];
 } SRB_EXTENSION, *PSRB_EXTENSION;
 
 BOOLEAN
