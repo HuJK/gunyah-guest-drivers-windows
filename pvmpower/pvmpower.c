@@ -12,15 +12,20 @@
  *
  *  - It binds to a root-enumerated device (ROOT\PVMPOWER, created by the
  *    installer) so it sits in the PnP tree and receives system power IRPs.
- *  - IRP_MJ_POWER preprocess (KMDF does not surface raw power IRPs): peek the
- *    S5 SET_POWER IRP (SystemState == PowerSystemShutdown) and cache its
+ *  - IRP_MJ_POWER preprocess (KMDF does not surface raw power IRPs): when the
+ *    S5 SET_POWER IRP (SystemState == PowerSystemShutdown) arrives, read its
  *    ShutdownType (POWER_ACTION) - the documented reboot-vs-poweroff
- *    discriminator. The IRP is passed back untouched via
- *    WdfDeviceWdmDispatchPreprocessedIrp.
+ *    discriminator - and IMMEDIATELY issue PSCI SYSTEM_RESET (0x84000009) for
+ *    PowerActionShutdownReset, else SYSTEM_OFF (0x84000008).
  *  - IRP_MJ_SHUTDOWN preprocess + IoRegisterLastChanceShutdownNotification:
- *    at the very end of shutdown issue PSCI SYSTEM_RESET (0x84000009) when a
- *    reboot was requested (PowerActionShutdownReset), else SYSTEM_OFF
- *    (0x84000008).
+ *    arms a fallback timer only. Measured on the device (breadcrumb run,
+ *    2026-07-02): the shutdown sequence is normal notifications -> FS flush ->
+ *    LAST-CHANCE -> and only THEN the S5 device power IRPs. Firing PSCI at
+ *    last-chance therefore killed the VM before any S5 IRP (and its
+ *    ShutdownType) could ever be seen - reboot always degraded to power-off.
+ *    Firing at the S5 IRP is strictly later, so it is at least as safe; the
+ *    last-chance timer (PSCI SYSTEM_OFF after 10s) only fires if this
+ *    platform ever fails to deliver an S5 IRP, restoring the old behavior.
  *
  * Platform gate: PSCI is only issued when the rdmapool device interface
  * (ACPI\RDMA0000 - the Gunyah pVM marker) is present. On QEMU/KVM or any
@@ -51,10 +56,18 @@ EVT_WDF_DRIVER_DEVICE_ADD PvmPowerEvtDeviceAdd;
 EVT_WDFDEVICE_WDM_IRP_PREPROCESS PvmPowerPowerIrpPreprocess;
 EVT_WDFDEVICE_WDM_IRP_PREPROCESS PvmPowerShutdownIrp;
 
-/* ShutdownType (POWER_ACTION) captured from the S5 system power IRP; read at
- * last-chance shutdown. PowerActionNone until an S5 IRP is seen -> defaults to
- * SYSTEM_OFF, which matches the pre-reboot-support behavior. */
+/* ShutdownType (POWER_ACTION) captured from the S5 system power IRP; kept for
+ * the fallback path. PowerActionNone until an S5 IRP is seen -> SYSTEM_OFF. */
 static volatile LONG g_ShutdownAction = PowerActionNone;
+
+/* Fallback: armed at last-chance shutdown; fires PSCI SYSTEM_OFF if no S5
+ * power IRP shows up to do the job properly (see header comment). */
+static KTIMER g_FallbackTimer;
+static KDPC g_FallbackDpc;
+#define PVMPOWER_FALLBACK_TIMEOUT_SEC 10
+
+/* Ensure PSCI is issued at most once (S5 path vs fallback timer race). */
+static volatile LONG g_PsciFired = 0;
 
 /* TRUE once the rdmapool interface (Gunyah pVM marker) has been seen. */
 static volatile LONG g_PlatformIsGunyahPvm = 0;
@@ -125,9 +138,46 @@ static BOOLEAN PvmPowerProbeGunyahPvm(VOID)
 }
 
 /*
- * IRP_MJ_POWER preprocess: peek, never complete. Cache the ShutdownType from
- * the S5 SET_POWER IRP; hand every IRP straight back to the framework. May run
- * up to DISPATCH_LEVEL, so no probing here.
+ * Issue PSCI at most once, picking RESET vs OFF from the given action. Any
+ * IRQL (the HVC stub is a single instruction and does not return on success).
+ */
+static VOID PvmPowerDoPsci(POWER_ACTION action, PCSTR origin)
+{
+    ULONGLONG fn = (action == PowerActionShutdownReset) ? PSCI_SYSTEM_RESET : PSCI_SYSTEM_OFF;
+
+    if (InterlockedExchange(&g_PsciFired, 1) != 0)
+    {
+        return;
+    }
+    DbgPrintEx(DPFLTR_DEFAULT_ID,
+               DPFLTR_INFO_LEVEL,
+               "pvmpower: %s, action=%d -> PSCI %s\n",
+               origin,
+               action,
+               fn == PSCI_SYSTEM_RESET ? "SYSTEM_RESET" : "SYSTEM_OFF");
+    (void)PsciHvcCall(fn, 0, 0, 0);
+    /* Should not return (VM reset or powered off). */
+    DbgPrintEx(DPFLTR_DEFAULT_ID, DPFLTR_ERROR_LEVEL, "pvmpower: PSCI call returned!\n");
+}
+
+static KDEFERRED_ROUTINE PvmPowerFallbackDpc;
+_Use_decl_annotations_ static VOID PvmPowerFallbackDpc(PKDPC Dpc, PVOID Context, PVOID Arg1, PVOID Arg2)
+{
+    UNREFERENCED_PARAMETER(Dpc);
+    UNREFERENCED_PARAMETER(Context);
+    UNREFERENCED_PARAMETER(Arg1);
+    UNREFERENCED_PARAMETER(Arg2);
+    /* No S5 power IRP arrived after last-chance shutdown: power off like the
+     * original behavior so the VM never hangs at the dead HalReturnToFirmware. */
+    PvmPowerDoPsci((POWER_ACTION)InterlockedCompareExchange(&g_ShutdownAction, 0, 0), "fallback timer");
+}
+
+/*
+ * IRP_MJ_POWER preprocess. For the S5 SET_POWER IRP this is where the VM
+ * actually powers off / reboots: the IRP carries the authoritative
+ * ShutdownType, and by this point last-chance shutdown has already run (see
+ * header comment). Everything else is peeked and passed straight back. May
+ * run up to DISPATCH_LEVEL, so only the cached platform flag is used.
  */
 NTSTATUS
 PvmPowerPowerIrpPreprocess(_In_ WDFDEVICE Device, _Inout_ PIRP Irp)
@@ -142,21 +192,26 @@ PvmPowerPowerIrpPreprocess(_In_ WDFDEVICE Device, _Inout_ PIRP Irp)
 
         if (irpStack->Parameters.Power.State.SystemState == PowerSystemShutdown)
         {
-            if (irpStack->MinorFunction == IRP_MN_SET_POWER)
-            {
-                InterlockedExchange(&g_ShutdownAction, (LONG)irpStack->Parameters.Power.ShutdownType);
-                PvmPowerRecordDword(L"LastS5SetShutdownType", (ULONG)irpStack->Parameters.Power.ShutdownType);
-            }
-            else
-            {
-                PvmPowerRecordDword(L"LastS5QueryShutdownType", (ULONG)irpStack->Parameters.Power.ShutdownType);
-            }
             DbgPrintEx(DPFLTR_DEFAULT_ID,
                        DPFLTR_INFO_LEVEL,
                        "pvmpower: S5 power IRP (%s), ShutdownType=%d (%s)\n",
                        irpStack->MinorFunction == IRP_MN_SET_POWER ? "set" : "query",
                        irpStack->Parameters.Power.ShutdownType,
                        irpStack->Parameters.Power.ShutdownType == PowerActionShutdownReset ? "reboot" : "power-off");
+            if (irpStack->MinorFunction == IRP_MN_SET_POWER)
+            {
+                InterlockedExchange(&g_ShutdownAction, (LONG)irpStack->Parameters.Power.ShutdownType);
+                PvmPowerRecordDword(L"LastS5SetShutdownType", (ULONG)irpStack->Parameters.Power.ShutdownType);
+                if (InterlockedCompareExchange(&g_PlatformIsGunyahPvm, 0, 0) != 0)
+                {
+                    PvmPowerDoPsci(irpStack->Parameters.Power.ShutdownType, "S5 set-power IRP");
+                    /* Only reached if PSCI failed; fall through to normal handling. */
+                }
+            }
+            else
+            {
+                PvmPowerRecordDword(L"LastS5QueryShutdownType", (ULONG)irpStack->Parameters.Power.ShutdownType);
+            }
         }
     }
 
@@ -166,30 +221,24 @@ PvmPowerPowerIrpPreprocess(_In_ WDFDEVICE Device, _Inout_ PIRP Irp)
 /*
  * Last-chance shutdown handler (IRP_MJ_SHUTDOWN arrives here only because
  * PvmPowerEvtDeviceAdd registered for last-chance notification). Runs at
- * PASSIVE_LEVEL at the very end of shutdown, after file systems flushed.
+ * PASSIVE_LEVEL, BEFORE the S5 device power IRPs (measured on the device) -
+ * so no PSCI here: probe the platform (PASSIVE work the S5 path cannot do)
+ * and arm the no-S5-IRP fallback timer.
  */
 NTSTATUS
 PvmPowerShutdownIrp(_In_ WDFDEVICE Device, _Inout_ PIRP Irp)
 {
-    POWER_ACTION action = (POWER_ACTION)InterlockedCompareExchange(&g_ShutdownAction, 0, 0);
-
     UNREFERENCED_PARAMETER(Device);
-
-    /* Breadcrumb: what we are about to act on (may be dropped if the registry
-     * is already locked down this late; that absence is itself a data point). */
-    PvmPowerRecordDword(L"LastChanceShutdownAction", (ULONG)action);
 
     if (PvmPowerProbeGunyahPvm())
     {
-        ULONGLONG fn = (action == PowerActionShutdownReset) ? PSCI_SYSTEM_RESET : PSCI_SYSTEM_OFF;
+        LARGE_INTEGER due;
+        due.QuadPart = -(LONGLONG)PVMPOWER_FALLBACK_TIMEOUT_SEC * 10 * 1000 * 1000; /* relative, 100ns */
         DbgPrintEx(DPFLTR_DEFAULT_ID,
                    DPFLTR_INFO_LEVEL,
-                   "pvmpower: last-chance shutdown, action=%d -> PSCI %s\n",
-                   action,
-                   fn == PSCI_SYSTEM_RESET ? "SYSTEM_RESET" : "SYSTEM_OFF");
-        (void)PsciHvcCall(fn, 0, 0, 0);
-        /* Should not return (VM reset or powered off). Fall through defensively. */
-        DbgPrintEx(DPFLTR_DEFAULT_ID, DPFLTR_ERROR_LEVEL, "pvmpower: PSCI call returned!\n");
+                   "pvmpower: last-chance shutdown - waiting for the S5 power IRP (fallback in %us)\n",
+                   PVMPOWER_FALLBACK_TIMEOUT_SEC);
+        (void)KeSetTimer(&g_FallbackTimer, due, &g_FallbackDpc);
     }
     else
     {
@@ -212,8 +261,11 @@ PvmPowerEvtDeviceAdd(_In_ WDFDRIVER Driver, _Inout_ PWDFDEVICE_INIT DeviceInit)
 
     UNREFERENCED_PARAMETER(Driver);
 
+    KeInitializeTimer(&g_FallbackTimer);
+    KeInitializeDpc(&g_FallbackDpc, PvmPowerFallbackDpc, NULL);
+
     /* KMDF surfaces neither raw power IRPs nor IRP_MJ_SHUTDOWN; take both as
-     * WDM preprocess callbacks. The power callback is peek-and-pass-through. */
+     * WDM preprocess callbacks. */
     status = WdfDeviceInitAssignWdmIrpPreprocessCallback(DeviceInit, PvmPowerPowerIrpPreprocess, IRP_MJ_POWER, NULL, 0);
     if (!NT_SUCCESS(status))
     {
