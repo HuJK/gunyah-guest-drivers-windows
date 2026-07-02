@@ -60,6 +60,40 @@ static volatile LONG g_ShutdownAction = PowerActionNone;
 static volatile LONG g_PlatformIsGunyahPvm = 0;
 
 /*
+ * Diagnostic breadcrumbs (PASSIVE_LEVEL only): persist what the power manager
+ * actually told us into Services\pvmpower\Parameters, flushed immediately so
+ * the values survive the PSCI power-off. Lets us see, after the next boot,
+ * whether the S5 IRP ever arrived before last-chance shutdown and which
+ * ShutdownType it carried. Best-effort: late in shutdown the registry may
+ * already be locked down, in which case the write is silently dropped.
+ */
+static VOID PvmPowerRecordDword(PCWSTR ValueName, ULONG Value)
+{
+    UNICODE_STRING keyName;
+    UNICODE_STRING valueName;
+    OBJECT_ATTRIBUTES oa;
+    HANDLE key = NULL;
+    NTSTATUS status;
+
+    if (KeGetCurrentIrql() != PASSIVE_LEVEL)
+    {
+        return;
+    }
+
+    RtlInitUnicodeString(&keyName, L"\\Registry\\Machine\\SYSTEM\\CurrentControlSet\\Services\\pvmpower\\Parameters");
+    InitializeObjectAttributes(&oa, &keyName, OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE, NULL, NULL);
+    status = ZwCreateKey(&key, KEY_SET_VALUE, &oa, 0, NULL, REG_OPTION_NON_VOLATILE, NULL);
+    if (!NT_SUCCESS(status))
+    {
+        return;
+    }
+    RtlInitUnicodeString(&valueName, ValueName);
+    (void)ZwSetValueKey(key, &valueName, 0, REG_DWORD, &Value, sizeof(Value));
+    (void)ZwFlushKey(key);
+    (void)ZwClose(key);
+}
+
+/*
  * Probe for the rdmapool device interface. Only ever PROMOTES the cached state
  * to "present" - an early negative (rdmapool not started yet) is not sticky.
  * PASSIVE_LEVEL only.
@@ -100,15 +134,30 @@ PvmPowerPowerIrpPreprocess(_In_ WDFDEVICE Device, _Inout_ PIRP Irp)
 {
     PIO_STACK_LOCATION irpStack = IoGetCurrentIrpStackLocation(Irp);
 
-    if (irpStack->MinorFunction == IRP_MN_SET_POWER && irpStack->Parameters.Power.Type == SystemPowerState &&
-        irpStack->Parameters.Power.State.SystemState == PowerSystemShutdown)
+    if (irpStack->Parameters.Power.Type == SystemPowerState &&
+        (irpStack->MinorFunction == IRP_MN_SET_POWER || irpStack->MinorFunction == IRP_MN_QUERY_POWER))
     {
-        InterlockedExchange(&g_ShutdownAction, (LONG)irpStack->Parameters.Power.ShutdownType);
-        DbgPrintEx(DPFLTR_DEFAULT_ID,
-                   DPFLTR_INFO_LEVEL,
-                   "pvmpower: S5 power IRP, ShutdownType=%d (%s)\n",
-                   irpStack->Parameters.Power.ShutdownType,
-                   irpStack->Parameters.Power.ShutdownType == PowerActionShutdownReset ? "reboot" : "power-off");
+        /* Breadcrumb: any S-IRP sighting at all (SystemState value). */
+        PvmPowerRecordDword(L"LastSxSystemState", (ULONG)irpStack->Parameters.Power.State.SystemState);
+
+        if (irpStack->Parameters.Power.State.SystemState == PowerSystemShutdown)
+        {
+            if (irpStack->MinorFunction == IRP_MN_SET_POWER)
+            {
+                InterlockedExchange(&g_ShutdownAction, (LONG)irpStack->Parameters.Power.ShutdownType);
+                PvmPowerRecordDword(L"LastS5SetShutdownType", (ULONG)irpStack->Parameters.Power.ShutdownType);
+            }
+            else
+            {
+                PvmPowerRecordDword(L"LastS5QueryShutdownType", (ULONG)irpStack->Parameters.Power.ShutdownType);
+            }
+            DbgPrintEx(DPFLTR_DEFAULT_ID,
+                       DPFLTR_INFO_LEVEL,
+                       "pvmpower: S5 power IRP (%s), ShutdownType=%d (%s)\n",
+                       irpStack->MinorFunction == IRP_MN_SET_POWER ? "set" : "query",
+                       irpStack->Parameters.Power.ShutdownType,
+                       irpStack->Parameters.Power.ShutdownType == PowerActionShutdownReset ? "reboot" : "power-off");
+        }
     }
 
     return WdfDeviceWdmDispatchPreprocessedIrp(Device, Irp);
@@ -125,6 +174,10 @@ PvmPowerShutdownIrp(_In_ WDFDEVICE Device, _Inout_ PIRP Irp)
     POWER_ACTION action = (POWER_ACTION)InterlockedCompareExchange(&g_ShutdownAction, 0, 0);
 
     UNREFERENCED_PARAMETER(Device);
+
+    /* Breadcrumb: what we are about to act on (may be dropped if the registry
+     * is already locked down this late; that absence is itself a data point). */
+    PvmPowerRecordDword(L"LastChanceShutdownAction", (ULONG)action);
 
     if (PvmPowerProbeGunyahPvm())
     {
