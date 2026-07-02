@@ -156,14 +156,9 @@ static ULONGLONG mem_get_physical_address(void *context, void *virt)
 
     /* rdmapool VAs are outside StorPort's DMA region; compute PA from the known
      * contiguous pool base. */
-    if (adaptExt->rdmaPoolActive && adaptExt->rdmaPoolBaseVA != NULL)
+    if (RdmaClientOwnsVA(&adaptExt->rdma, virt))
     {
-        ULONG_PTR addr = (ULONG_PTR)virt;
-        ULONG_PTR base = (ULONG_PTR)adaptExt->rdmaPoolBaseVA;
-        if (addr >= base && addr < base + adaptExt->rdmaPoolSize)
-        {
-            return adaptExt->rdmaPoolBasePA.QuadPart + (addr - base);
-        }
+        return (ULONGLONG)RdmaClientVAtoPA(&adaptExt->rdma, virt).QuadPart;
     }
 
     pa = StorPortGetPhysicalAddress(context, NULL, virt, &uLength);

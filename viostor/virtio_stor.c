@@ -592,7 +592,7 @@ VirtIoPassiveInitializeRoutine(IN PVOID DeviceExtension)
      * region left after the vrings, and start the completion poll thread. Both
      * require PASSIVE_LEVEL, which is why they live here and not in HwInitialize.
      */
-    if (adaptExt->rdmaPoolActive)
+    if (adaptExt->rdma.Active)
     {
         if (!NT_SUCCESS(VioStorBounceInit(DeviceExtension)))
         {
@@ -1634,7 +1634,7 @@ VirtIoBuildIo(IN PVOID DeviceExtension, IN PSCSI_REQUEST_BLOCK Srb)
      * chunks (out_hdr + chunks + status, all in rdmapool). No per-4KB-page
      * descriptors, no hard splitting in the driver.
      */
-    if (adaptExt->rdmaPoolActive)
+    if (adaptExt->rdma.Active)
     {
         srbExt->vbr.out_hdr.sector = lba;
         srbExt->vbr.out_hdr.ioprio = 0;

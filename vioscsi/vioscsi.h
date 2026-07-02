@@ -39,6 +39,7 @@
 #include "virtio_pci.h"
 #include "virtio.h"
 #include "virtio_ring.h"
+#include "vioscsi_rdma.h"
 
 typedef struct VirtIOBufferDescriptor VIO_SG, *PVIO_SG;
 
@@ -261,6 +262,14 @@ typedef struct _SRB_EXTENSION
     VRING_DESC_ALIAS desc_alias[VIRTIO_MAX_SG];
     ULONGLONG time;
     ULONG_PTR id;
+
+    /* Bounce staging for the restricted DMA pool path (vioscsi_rdma.c). */
+    PVOID bounceCtl;        /* control slot (req + resp unions) VA, or NULL */
+    ULONG bounceChunkFirst; /* psgl[] index of the first data chunk */
+    ULONG bounceChunkCount; /* number of data chunks in psgl[first..first+count-1] */
+    BOOLEAN bounceDataIn;   /* TRUE = copy chunks back to the SRB buffer on completion */
+    PUCHAR srbDataVA;       /* system VA of the original SRB data buffer */
+    ULONG srbDataLen;       /* bytes of I/O data */
 } SRB_EXTENSION, *PSRB_EXTENSION;
 #pragma pack()
 
@@ -354,6 +363,17 @@ typedef struct _ADAPTER_EXTENSION
     ULONGLONG fw_ver;
     ULONG resp_time;
     BOOLEAN bRemoved;
+
+    /* Restricted DMA pool (Gunyah protected VM). When rdma.Active, vrings and
+     * all device-visible I/O staging live in the contiguous pool region; see
+     * vioscsi_rdma.c and the shared client rdmapool/rdmaclient.c (connection,
+     * bounce allocator, completion poll thread). Inactive on QEMU/KVM (no
+     * ACPI\RDMA0000 device), keeping the normal DMA path. */
+    RDMA_CLIENT rdma;
+    ULONG disablePoll;    /* registry DisableCompletionPoll: 1 => ISR/DPC only */
+    ULONG pollIntervalUs; /* registry PollIntervalUs: sleep this many us between drains
+                           * while I/O is outstanding (default 1000 = 1ms gentle poll);
+                           * 0 => tight KeStallExecutionProcessor spin (max IOPS) */
 } ADAPTER_EXTENSION, *PADAPTER_EXTENSION;
 
 #ifndef PCIX_TABLE_POINTER

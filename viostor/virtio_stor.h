@@ -263,25 +263,15 @@ typedef struct _ADAPTER_EXTENSION
     ULONG reset_in_progress_count;
     ULONGLONG fw_ver;
 
-    /* Restricted DMA pool (Gunyah protected VM). When rdmaPoolActive, vrings and
-     * all device-visible I/O staging live in this contiguous pool region; see
-     * viostor_rdma.c. */
-    BOOLEAN rdmaPoolActive;
-    PDEVICE_OBJECT rdmaPoolDeviceObject;
-    PFILE_OBJECT rdmaPoolFileObject;
-    PVOID rdmaPoolBaseVA;
-    PHYSICAL_ADDRESS rdmaPoolBasePA;
-    ULONG64 rdmaPoolSize;
-    BOUNCE_ALLOCATOR bounce;
-
-    /* Completion poll thread (replaces inline busy-poll). */
-    PVOID pollThread;       /* PKTHREAD referenced object */
-    KEVENT pollWake;        /* signalled by submit path / kick */
-    volatile LONG pollStop; /* set to 1 to ask the thread to exit */
-    ULONG disablePoll;      /* registry DisableCompletionPoll: 1 => ISR/DPC only */
-    ULONG pollIntervalUs;   /* registry PollIntervalUs: sleep this many us between drains
-                             * while I/O is outstanding (default 1000 = 1ms gentle poll);
-                             * 0 => tight KeStallExecutionProcessor spin (max IOPS) */
+    /* Restricted DMA pool (Gunyah protected VM). When rdma.Active, vrings and
+     * all device-visible I/O staging live in the contiguous pool region; see
+     * viostor_rdma.c and the shared client rdmapool/rdmaclient.c (connection,
+     * bounce allocator, completion poll thread). */
+    RDMA_CLIENT rdma;
+    ULONG disablePoll;    /* registry DisableCompletionPoll: 1 => ISR/DPC only */
+    ULONG pollIntervalUs; /* registry PollIntervalUs: sleep this many us between drains
+                           * while I/O is outstanding (default 1000 = 1ms gentle poll);
+                           * 0 => tight KeStallExecutionProcessor spin (max IOPS) */
 #ifdef DBG
     LONG srb_cnt;
     LONG inqueue_cnt;

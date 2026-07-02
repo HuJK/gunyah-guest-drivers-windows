@@ -115,7 +115,7 @@ RhelDoFlush(PVOID DeviceExtension, PSRB_TYPE Srb, BOOLEAN resend, BOOLEAN bIsr)
     srbExt->out = 1;
     srbExt->in = 1;
 
-    if (adaptExt->rdmaPoolActive)
+    if (adaptExt->rdma.Active)
     {
         PVOID ctl = VioStorBounceAllocCtl(DeviceExtension, srbExt);
         if (ctl == NULL)
@@ -277,7 +277,7 @@ RhelDoReadWrite(PVOID DeviceExtension, PSRB_TYPE Srb)
     }
 
     /* Wake the completion poll thread (restricted DMA pool path). */
-    if (adaptExt->rdmaPoolActive)
+    if (adaptExt->rdma.Active)
     {
         VioStorPollKick(DeviceExtension);
     }
@@ -479,7 +479,7 @@ RhelGetSerialNumber(IN PVOID DeviceExtension, IN PSRB_TYPE Srb)
     srbExt->out = 1;
     srbExt->in = 2;
 
-    if (adaptExt->rdmaPoolActive)
+    if (adaptExt->rdma.Active)
     {
         PVOID ctl = VioStorBounceAllocCtl(DeviceExtension, srbExt);
         if (ctl == NULL)
@@ -683,7 +683,7 @@ VOID RhelGetDiskGeometry(IN PVOID DeviceExtension)
      * would otherwise sit in non-device-visible guest memory). Drop the feature
      * so it is neither advertised to the OS nor used, avoiding a corrupt discard.
      */
-    if (adaptExt->rdmaPoolActive)
+    if (adaptExt->rdma.Active)
     {
         adaptExt->features &= ~(1ULL << VIRTIO_BLK_F_DISCARD);
     }

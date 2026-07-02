@@ -151,8 +151,18 @@ static void mem_free_contiguous_pages(void *context, void *virt)
 
 static ULONGLONG mem_get_physical_address(void *context, void *virt)
 {
+    PADAPTER_EXTENSION adaptExt = (PADAPTER_EXTENSION)context;
     ULONG uLength;
-    STOR_PHYSICAL_ADDRESS pa = StorPortGetPhysicalAddress(context, NULL, virt, &uLength);
+    STOR_PHYSICAL_ADDRESS pa;
+
+    /* rdmapool VAs are outside StorPort's DMA region; compute PA from the known
+     * contiguous pool base. */
+    if (RdmaClientOwnsVA(&adaptExt->rdma, virt))
+    {
+        return (ULONGLONG)RdmaClientVAtoPA(&adaptExt->rdma, virt).QuadPart;
+    }
+
+    pa = StorPortGetPhysicalAddress(context, NULL, virt, &uLength);
     return pa.QuadPart;
 }
 

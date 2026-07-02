@@ -560,6 +560,22 @@ VioScsiFindAdapter(IN PVOID DeviceExtension,
     {
         adaptExt->poolAllocationVa = (PVOID)((ULONG_PTR)adaptExt->pageAllocationVa + adaptExt->pageAllocationSize);
     }
+
+    /*
+     * Restricted DMA pool (Gunyah protected VM): redirect the vrings into
+     * rdmapool (device-visible memory) and stage all I/O through bounce
+     * buffers. Use direct descriptors and a fixed large-chunk transfer size;
+     * completions are reaped by the poll thread plus the ISR. Driver-internal
+     * pool memory (poolAllocationVa) stays in the uncached extension. No-op if
+     * rdmapool is absent (normal KVM/QEMU path).
+     */
+    if (NT_SUCCESS(VioScsiConnectRdmaPool(DeviceExtension)))
+    {
+        adaptExt->indirect = FALSE;
+        ConfigInfo->MaximumTransferLength = BOUNCE_DATA_CHUNK_SIZE;
+        ConfigInfo->NumberOfPhysicalBreaks = (BOUNCE_DATA_CHUNK_SIZE / PAGE_SIZE) + 1;
+        adaptExt->max_physical_breaks = BOUNCE_DATA_CHUNK_SIZE / PAGE_SIZE;
+    }
     RhelDbgPrint(TRACE_LEVEL_INFORMATION,
                  " Page-aligned area at %p, size = %d\n",
                  adaptExt->pageAllocationVa,
@@ -597,6 +613,37 @@ VioScsiPassiveInitializeRoutine(IN PVOID DeviceExtension)
         StorPortInitializeDpc(DeviceExtension, &adaptExt->dpc[index], VioScsiCompleteDpcRoutine);
     }
     adaptExt->dpc_ok = TRUE;
+
+    /*
+     * Restricted DMA pool path: start the completion poll thread (needs
+     * PASSIVE_LEVEL, which is why it lives here and not in HwInitialize). It
+     * reaps completions within ~PollIntervalUs when a completion interrupt to
+     * an idle vCPU is delivered late or not at all (no 250ms StorPort-watchdog
+     * stall), and blocks entirely when no I/O is outstanding. The ISR/DPC path
+     * (INTx, MSISupported=0) stays wired too. Registry overrides
+     * (Services\vioscsi\Parameters): PollIntervalUs = us between drains (0 =>
+     * tight spin, max IOPS); DisableCompletionPoll=1 => interrupt-only.
+     */
+    if (adaptExt->rdma.Active)
+    {
+        adaptExt->pollIntervalUs = VIOSCSI_POLL_INTERVAL_US;
+        VioScsiReadRegistryParameter(DeviceExtension,
+                                     (PUCHAR) "PollIntervalUs",
+                                     FIELD_OFFSET(ADAPTER_EXTENSION, pollIntervalUs));
+        adaptExt->disablePoll = 0;
+        VioScsiReadRegistryParameter(DeviceExtension,
+                                     (PUCHAR) "DisableCompletionPoll",
+                                     FIELD_OFFSET(ADAPTER_EXTENSION, disablePoll));
+        if (adaptExt->disablePoll)
+        {
+            RhelDbgPrint(TRACE_LEVEL_FATAL, " completion poll thread OFF (interrupt-only mode)\n");
+        }
+        else if (!NT_SUCCESS(VioScsiStartPollThread(DeviceExtension)))
+        {
+            RhelDbgPrint(TRACE_LEVEL_FATAL, " poll thread start failed\n");
+            return FALSE;
+        }
+    }
     EXIT_FN();
     return TRUE;
 }
@@ -697,6 +744,17 @@ VioScsiHwInitialize(IN PVOID DeviceExtension)
         }
     }
 
+    /*
+     * Restricted DMA pool path: carve the bounce allocator (event area,
+     * control slots, data chunks) out of the rdmapool region left after the
+     * vrings. Must happen before KickEvent below posts the event buffers.
+     */
+    if (adaptExt->rdma.Active && !NT_SUCCESS(VioScsiBounceInit(DeviceExtension)))
+    {
+        RhelDbgPrint(TRACE_LEVEL_FATAL, " bounce init failed\n");
+        return FALSE;
+    }
+
     for (index = 0; index < adaptExt->num_queues; ++index)
     {
         element = &adaptExt->processing_srbs[index];
@@ -712,7 +770,12 @@ VioScsiHwInitialize(IN PVOID DeviceExtension)
         if (adaptExt->dpc == NULL)
         {
             adaptExt->tmf_cmd.SrbExtension = (PSRB_EXTENSION)VioScsiPoolAlloc(DeviceExtension, sizeof(SRB_EXTENSION));
-            adaptExt->events = (PVirtIOSCSIEventNode)VioScsiPoolAlloc(DeviceExtension, sizeof(VirtIOSCSIEventNode) * 8);
+            /* Restricted DMA pool: the device writes events, so the nodes must
+             * live in device-visible pool memory instead of the uncached
+             * extension. */
+            adaptExt->events = adaptExt->rdma.Active ? (PVirtIOSCSIEventNode)VioScsiBounceEventNodes(DeviceExtension)
+                                                     : (PVirtIOSCSIEventNode)VioScsiPoolAlloc(DeviceExtension,
+                                                                                              sizeof(VirtIOSCSIEventNode) * 8);
             adaptExt->dpc = (PSTOR_DPC)VioScsiPoolAlloc(DeviceExtension, sizeof(STOR_DPC) * adaptExt->num_queues);
         }
     }
@@ -934,15 +997,70 @@ VOID HandleResponse(IN PVOID DeviceExtension, IN PVirtIOSCSICmd cmd)
     EXIT_FN();
 }
 
-BOOLEAN
-VioScsiInterrupt(IN PVOID DeviceExtension)
+/*
+ * Drain the control queue (pending TMF) and the event queue. Callers must hold
+ * (or be in) the interrupt-lock context that serializes these queues: the INTx
+ * ISR itself, or the poll thread under StorPortAcquireSpinLock(InterruptLock).
+ */
+static VOID VioScsiDrainCtrlAndEventQueues(IN PVOID DeviceExtension)
 {
     PVirtIOSCSICmd cmd = NULL;
     PVirtIOSCSIEventNode evtNode = NULL;
     unsigned int len = 0;
+    PSRB_TYPE Srb = NULL;
+    PADAPTER_EXTENSION adaptExt = (PADAPTER_EXTENSION)DeviceExtension;
+
+    if (adaptExt->tmf_infly)
+    {
+        while ((cmd = (PVirtIOSCSICmd)virtqueue_get_buf(adaptExt->vq[VIRTIO_SCSI_CONTROL_QUEUE], &len)) != NULL)
+        {
+            VirtIOSCSICtrlTMFResp *resp;
+            Srb = (PSRB_TYPE)cmd->srb;
+            ASSERT(Srb == (PSRB_TYPE)&adaptExt->tmf_cmd.Srb);
+            /* Restricted DMA pool: latch the TMF response out of the bounce
+             * slot before reading it. No-op for non-bounced requests. */
+            VioScsiBounceComplete(DeviceExtension, CONTAINING_RECORD(cmd, SRB_EXTENSION, cmd));
+            resp = &cmd->resp.tmf;
+            switch (resp->response)
+            {
+                case VIRTIO_SCSI_S_OK:
+                case VIRTIO_SCSI_S_FUNCTION_SUCCEEDED:
+                    break;
+                default:
+                    RhelDbgPrint(TRACE_LEVEL_ERROR, " unknown response %d\n", resp->response);
+                    ASSERT(0);
+                    break;
+            }
+            StorPortResume(DeviceExtension);
+        }
+        adaptExt->tmf_infly = FALSE;
+    }
+    while ((evtNode = (PVirtIOSCSIEventNode)virtqueue_get_buf(adaptExt->vq[VIRTIO_SCSI_EVENTS_QUEUE], &len)) != NULL)
+    {
+        PVirtIOSCSIEvent evt = &evtNode->event;
+        switch (evt->event)
+        {
+            case VIRTIO_SCSI_T_NO_EVENT:
+                break;
+            case VIRTIO_SCSI_T_TRANSPORT_RESET:
+                TransportReset(DeviceExtension, evt);
+                break;
+            case VIRTIO_SCSI_T_PARAM_CHANGE:
+                ParamChange(DeviceExtension, evt);
+                break;
+            default:
+                RhelDbgPrint(TRACE_LEVEL_ERROR, " Unsupport virtio scsi event %x\n", evt->event);
+                break;
+        }
+        SynchronizedKickEventRoutine(DeviceExtension, evtNode);
+    }
+}
+
+BOOLEAN
+VioScsiInterrupt(IN PVOID DeviceExtension)
+{
     PADAPTER_EXTENSION adaptExt = NULL;
     BOOLEAN isInterruptServiced = FALSE;
-    PSRB_TYPE Srb = NULL;
     ULONG intReason = 0;
 
     adaptExt = (PADAPTER_EXTENSION)DeviceExtension;
@@ -961,48 +1079,7 @@ VioScsiInterrupt(IN PVOID DeviceExtension)
     {
         isInterruptServiced = TRUE;
 
-        if (adaptExt->tmf_infly)
-        {
-            while ((cmd = (PVirtIOSCSICmd)virtqueue_get_buf(adaptExt->vq[VIRTIO_SCSI_CONTROL_QUEUE], &len)) != NULL)
-            {
-                VirtIOSCSICtrlTMFResp *resp;
-                Srb = (PSRB_TYPE)cmd->srb;
-                ASSERT(Srb == (PSRB_TYPE)&adaptExt->tmf_cmd.Srb);
-                resp = &cmd->resp.tmf;
-                switch (resp->response)
-                {
-                    case VIRTIO_SCSI_S_OK:
-                    case VIRTIO_SCSI_S_FUNCTION_SUCCEEDED:
-                        break;
-                    default:
-                        RhelDbgPrint(TRACE_LEVEL_ERROR, " unknown response %d\n", resp->response);
-                        ASSERT(0);
-                        break;
-                }
-                StorPortResume(DeviceExtension);
-            }
-            adaptExt->tmf_infly = FALSE;
-        }
-        while ((evtNode = (PVirtIOSCSIEventNode)virtqueue_get_buf(adaptExt->vq[VIRTIO_SCSI_EVENTS_QUEUE], &len)) !=
-               NULL)
-        {
-            PVirtIOSCSIEvent evt = &evtNode->event;
-            switch (evt->event)
-            {
-                case VIRTIO_SCSI_T_NO_EVENT:
-                    break;
-                case VIRTIO_SCSI_T_TRANSPORT_RESET:
-                    TransportReset(DeviceExtension, evt);
-                    break;
-                case VIRTIO_SCSI_T_PARAM_CHANGE:
-                    ParamChange(DeviceExtension, evt);
-                    break;
-                default:
-                    RhelDbgPrint(TRACE_LEVEL_ERROR, " Unsupport virtio scsi event %x\n", evt->event);
-                    break;
-            }
-            SynchronizedKickEventRoutine(DeviceExtension, evtNode);
-        }
+        VioScsiDrainCtrlAndEventQueues(DeviceExtension);
 
         if (!adaptExt->dump_mode && adaptExt->dpc_ok)
         {
@@ -1052,6 +1129,9 @@ static BOOLEAN VioScsiMSInterruptWorker(IN PVOID DeviceExtension, IN ULONG Messa
                 VirtIOSCSICtrlTMFResp *resp;
                 Srb = (PSRB_TYPE)(cmd->srb);
                 ASSERT(Srb == (PSRB_TYPE)&adaptExt->tmf_cmd.Srb);
+                /* Restricted DMA pool: latch the TMF response out of the bounce
+                 * slot before reading it. No-op for non-bounced requests. */
+                VioScsiBounceComplete(DeviceExtension, CONTAINING_RECORD(cmd, SRB_EXTENSION, cmd));
                 resp = &cmd->resp.tmf;
                 switch (resp->response)
                 {
@@ -1123,6 +1203,37 @@ VioScsiMSInterrupt(IN PVOID DeviceExtension, IN ULONG MessageID)
         }
     }
     return isInterruptServiced;
+}
+
+/*
+ * One full drain pass for the completion poll thread (restricted DMA pool
+ * path, PASSIVE_LEVEL): request queues via ProcessQueue (which takes the
+ * DPC/interrupt lock itself), then the control/event queues.
+ */
+VOID VioScsiPollDrainAll(IN PVOID DeviceExtension)
+{
+    PADAPTER_EXTENSION adaptExt = (PADAPTER_EXTENSION)DeviceExtension;
+    ULONG q;
+
+    for (q = 0; q < adaptExt->num_queues; q++)
+    {
+        ProcessQueue(DeviceExtension, QUEUE_TO_MESSAGE(VIRTIO_SCSI_REQUEST_QUEUE_0 + q), FALSE);
+    }
+
+    /*
+     * Control/event queues: only under INTx (MSI disabled), where taking the
+     * InterruptLock serializes us against VioScsiInterrupt touching the same
+     * queues. On the rdmapool platform MSISupported=0 forces INTx; under MSI-X
+     * the per-message ISR owns these queues without a lock we could share, so
+     * leave them to it there.
+     */
+    if (!adaptExt->msix_enabled)
+    {
+        STOR_LOCK_HANDLE LockHandle = {0};
+        StorPortAcquireSpinLock(DeviceExtension, InterruptLock, NULL, &LockHandle);
+        VioScsiDrainCtrlAndEventQueues(DeviceExtension);
+        StorPortReleaseSpinLock(DeviceExtension, &LockHandle);
+    }
 }
 
 BOOLEAN
@@ -1344,46 +1455,68 @@ VioScsiBuildIo(IN PVOID DeviceExtension, IN PSCSI_REQUEST_BLOCK Srb)
         RtlCopyMemory(cmd->req.cmd.cdb, cdb, min(VIRTIO_SCSI_CDB_SIZE, SRB_CDB_LENGTH(Srb)));
     }
 
-    sgElement = 0;
-    srbExt->psgl[sgElement].physAddr = StorPortGetPhysicalAddress(DeviceExtension, NULL, &cmd->req.cmd, &fragLen);
-    srbExt->psgl[sgElement].length = sizeof(cmd->req.cmd);
-    sgElement++;
-
-    sgList = StorPortGetScatterGatherList(DeviceExtension, Srb);
-    if (sgList)
+    /*
+     * Restricted DMA pool: the device cannot touch the guest data pages in the
+     * SGL, so stage the request through rdmapool memory — req/resp unions in a
+     * control slot, data through a few large contiguous bounce chunks. No
+     * per-4KB-page descriptors.
+     */
+    if (adaptExt->rdma.Active)
     {
-        sgMaxElements = min((adaptExt->max_physical_breaks + 1), sgList->NumberOfElements);
-
-        if ((SRB_FLAGS(Srb) & SRB_FLAGS_DATA_OUT) == SRB_FLAGS_DATA_OUT)
+        if (!VioScsiBounceBuild(DeviceExtension, Srb))
         {
-            for (i = 0; i < sgMaxElements; i++, sgElement++)
-            {
-                srbExt->psgl[sgElement].physAddr = sgList->List[i].PhysicalAddress;
-                srbExt->psgl[sgElement].length = sgList->List[i].Length;
-                srbExt->Xfer += sgList->List[i].Length;
-            }
+            /* Pool momentarily exhausted; ask the class driver to retry. */
+            UCHAR ScsiStatus = SCSISTAT_QUEUE_FULL;
+            SRB_SET_SRB_STATUS(Srb, SRB_STATUS_BUSY);
+            SRB_SET_SCSI_STATUS(((PSRB_TYPE)Srb), ScsiStatus);
+            StorPortBusy(DeviceExtension, 10);
+            CompleteRequest(DeviceExtension, (PSRB_TYPE)Srb);
+            return FALSE;
         }
     }
-
-    srbExt->out = sgElement;
-    srbExt->psgl[sgElement].physAddr = StorPortGetPhysicalAddress(DeviceExtension, NULL, &cmd->resp.cmd, &fragLen);
-    srbExt->psgl[sgElement].length = sizeof(cmd->resp.cmd);
-    sgElement++;
-    if (sgList)
+    else
     {
-        sgMaxElements = min((adaptExt->max_physical_breaks + 1), sgList->NumberOfElements);
+        sgElement = 0;
+        srbExt->psgl[sgElement].physAddr = StorPortGetPhysicalAddress(DeviceExtension, NULL, &cmd->req.cmd, &fragLen);
+        srbExt->psgl[sgElement].length = sizeof(cmd->req.cmd);
+        sgElement++;
 
-        if ((SRB_FLAGS(Srb) & SRB_FLAGS_DATA_OUT) != SRB_FLAGS_DATA_OUT)
+        sgList = StorPortGetScatterGatherList(DeviceExtension, Srb);
+        if (sgList)
         {
-            for (i = 0; i < sgMaxElements; i++, sgElement++)
+            sgMaxElements = min((adaptExt->max_physical_breaks + 1), sgList->NumberOfElements);
+
+            if ((SRB_FLAGS(Srb) & SRB_FLAGS_DATA_OUT) == SRB_FLAGS_DATA_OUT)
             {
-                srbExt->psgl[sgElement].physAddr = sgList->List[i].PhysicalAddress;
-                srbExt->psgl[sgElement].length = sgList->List[i].Length;
-                srbExt->Xfer += sgList->List[i].Length;
+                for (i = 0; i < sgMaxElements; i++, sgElement++)
+                {
+                    srbExt->psgl[sgElement].physAddr = sgList->List[i].PhysicalAddress;
+                    srbExt->psgl[sgElement].length = sgList->List[i].Length;
+                    srbExt->Xfer += sgList->List[i].Length;
+                }
             }
         }
+
+        srbExt->out = sgElement;
+        srbExt->psgl[sgElement].physAddr = StorPortGetPhysicalAddress(DeviceExtension, NULL, &cmd->resp.cmd, &fragLen);
+        srbExt->psgl[sgElement].length = sizeof(cmd->resp.cmd);
+        sgElement++;
+        if (sgList)
+        {
+            sgMaxElements = min((adaptExt->max_physical_breaks + 1), sgList->NumberOfElements);
+
+            if ((SRB_FLAGS(Srb) & SRB_FLAGS_DATA_OUT) != SRB_FLAGS_DATA_OUT)
+            {
+                for (i = 0; i < sgMaxElements; i++, sgElement++)
+                {
+                    srbExt->psgl[sgElement].physAddr = sgList->List[i].PhysicalAddress;
+                    srbExt->psgl[sgElement].length = sgList->List[i].Length;
+                    srbExt->Xfer += sgList->List[i].Length;
+                }
+            }
+        }
+        srbExt->in = sgElement - srbExt->out;
     }
-    srbExt->in = sgElement - srbExt->out;
 
     if (adaptExt->resp_time)
     {
@@ -1477,6 +1610,10 @@ VOID ProcessQueue(IN PVOID DeviceExtension, IN ULONG MessageID, IN BOOLEAN isr)
 
             if (bFound)
             {
+                /* Restricted DMA pool: copy resp/sense and read data out of the
+                 * bounce buffers and free them BEFORE HandleResponse reads
+                 * cmd.resp. No-op for non-bounced requests. */
+                VioScsiBounceComplete(DeviceExtension, srbExt);
                 HandleResponse(DeviceExtension, &srbExt->cmd);
             }
         }

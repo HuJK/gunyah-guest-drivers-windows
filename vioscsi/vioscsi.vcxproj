@@ -114,7 +114,7 @@
   </PropertyGroup>
   <ItemDefinitionGroup>
     <ClCompile>
-      <AdditionalIncludeDirectories>$(IntDir);%(AdditionalIncludeDirectories);..\VirtIO</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(IntDir);%(AdditionalIncludeDirectories);..\VirtIO;..\rdmapool</AdditionalIncludeDirectories>
       <WarningLevel>Level3</WarningLevel>
     </ClCompile>
     <Link>
@@ -200,6 +200,8 @@
     <ClInclude Include="helper.h" />
     <ClInclude Include="trace.h" />
     <ClInclude Include="vioscsi.h" />
+    <ClInclude Include="vioscsi_rdma.h" />
+    <ClInclude Include="..\rdmapool\rdmaclient.h" />
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="vioscsi.rc" />
@@ -209,6 +211,8 @@
     <ClCompile Include="utils.c" />
     <ClCompile Include="vioscsi.c" />
     <ClCompile Include="virtio_pci.c" />
+    <ClCompile Include="vioscsi_rdma.c" />
+    <ClCompile Include="..\rdmapool\rdmaclient.c" />
   </ItemGroup>
   <ItemGroup>
     <Mofcomp Include="vioscsi.mof" />

@@ -2,7 +2,7 @@ $ErrorActionPreference='Continue'
 $base = $PSScriptRoot
 Write-Host "DroidVM ARM64 driver installer" -ForegroundColor Cyan
 # NetKVM LAST: on a protected VM, touching a live NIC can bugcheck; do the others first.
-$order = @('rdmapool','viostor','vioinput','NetKVM')
+$order = @('rdmapool','viostor','vioscsi','vioinput','NetKVM')
 function Get-Pkgs {
   $r=@(); $pub=$null
   foreach($l in (pnputil /enum-drivers)){

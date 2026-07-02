@@ -173,6 +173,12 @@ VOID SendSRB(IN PVOID DeviceExtension, IN PSRB_TYPE Srb)
         virtqueue_notify(adaptExt->vq[QueueNumber]);
     }
 
+    /* Wake the completion poll thread (restricted DMA pool path). */
+    if (adaptExt->rdma.Active)
+    {
+        VioScsiPollKick(DeviceExtension);
+    }
+
     EXIT_FN_SRB();
 }
 
@@ -242,21 +248,50 @@ DeviceReset(IN PVOID DeviceExtension)
     srbExt->psgl = srbExt->vio_sg;
     srbExt->pdesc = srbExt->desc_alias;
     sgElement = 0;
-    srbExt->psgl[sgElement].physAddr = StorPortGetPhysicalAddress(DeviceExtension, NULL, &cmd->req.tmf, &fragLen);
-    srbExt->psgl[sgElement].length = sizeof(cmd->req.tmf);
-    sgElement++;
-    srbExt->out = sgElement;
-    srbExt->psgl[sgElement].physAddr = StorPortGetPhysicalAddress(DeviceExtension, NULL, &cmd->resp.tmf, &fragLen);
-    srbExt->psgl[sgElement].length = sizeof(cmd->resp.tmf);
-    sgElement++;
-    srbExt->in = sgElement - srbExt->out;
+    if (adaptExt->rdma.Active)
+    {
+        /* Restricted DMA pool: the TMF req/resp live in the srb extension,
+         * which is not device-visible; stage them through a control slot. */
+        PVOID ctl = VioScsiBounceAllocCtl(DeviceExtension, srbExt);
+        if (ctl == NULL)
+        {
+            return FALSE;
+        }
+        srbExt->psgl[sgElement].physAddr = VioScsiRdmaVAtoPA(DeviceExtension, (PUCHAR)ctl + BOUNCE_CTL_REQ_OFFSET);
+        srbExt->psgl[sgElement].length = sizeof(cmd->req.tmf);
+        sgElement++;
+        srbExt->out = sgElement;
+        srbExt->psgl[sgElement].physAddr = VioScsiRdmaVAtoPA(DeviceExtension, (PUCHAR)ctl + BOUNCE_CTL_RESP_OFFSET);
+        srbExt->psgl[sgElement].length = sizeof(cmd->resp.tmf);
+        sgElement++;
+        srbExt->in = sgElement - srbExt->out;
+    }
+    else
+    {
+        srbExt->psgl[sgElement].physAddr = StorPortGetPhysicalAddress(DeviceExtension, NULL, &cmd->req.tmf, &fragLen);
+        srbExt->psgl[sgElement].length = sizeof(cmd->req.tmf);
+        sgElement++;
+        srbExt->out = sgElement;
+        srbExt->psgl[sgElement].physAddr = StorPortGetPhysicalAddress(DeviceExtension, NULL, &cmd->resp.tmf, &fragLen);
+        srbExt->psgl[sgElement].length = sizeof(cmd->resp.tmf);
+        sgElement++;
+        srbExt->in = sgElement - srbExt->out;
+    }
     StorPortPause(DeviceExtension, 60);
     if (!SendTMF(DeviceExtension, Srb))
     {
+        /* Free the bounce control slot again (no-op on the normal path). */
+        VioScsiBounceComplete(DeviceExtension, srbExt);
         StorPortResume(DeviceExtension);
         return FALSE;
     }
     adaptExt->tmf_infly = TRUE;
+    /* Wake the completion poll thread so the TMF response is reaped promptly
+     * even if the completion interrupt goes missing (restricted DMA pool). */
+    if (adaptExt->rdma.Active)
+    {
+        VioScsiPollKick(DeviceExtension);
+    }
     return TRUE;
 }
 
@@ -265,6 +300,11 @@ VOID ShutDown(IN PVOID DeviceExtension)
     ULONG index;
     PADAPTER_EXTENSION adaptExt = (PADAPTER_EXTENSION)DeviceExtension;
     ENTER_FN();
+
+    /* Stop the completion poll thread before tearing the queues down so it can
+     * no longer touch them (restricted DMA pool path). */
+    VioScsiStopPollThread(DeviceExtension);
+
     virtio_device_reset(&adaptExt->vdev);
     virtio_delete_queues(&adaptExt->vdev);
     for (index = VIRTIO_SCSI_CONTROL_QUEUE; index < adaptExt->num_queues + VIRTIO_SCSI_REQUEST_QUEUE_0; ++index)
@@ -547,7 +587,16 @@ KickEvent(IN PVOID DeviceExtension, IN PVirtIOSCSIEventNode EventNode)
     ENTER_FN();
     adaptExt = (PADAPTER_EXTENSION)DeviceExtension;
     RtlZeroMemory((PVOID)EventNode, sizeof(VirtIOSCSIEventNode));
-    EventNode->sg.physAddr = StorPortGetPhysicalAddress(DeviceExtension, NULL, &EventNode->event, &fragLen);
+    if (adaptExt->rdma.Active)
+    {
+        /* Event nodes live in the rdmapool (device-visible); StorPort does not
+         * know their physical addresses. */
+        EventNode->sg.physAddr = VioScsiRdmaVAtoPA(DeviceExtension, &EventNode->event);
+    }
+    else
+    {
+        EventNode->sg.physAddr = StorPortGetPhysicalAddress(DeviceExtension, NULL, &EventNode->event, &fragLen);
+    }
     EventNode->sg.length = sizeof(VirtIOSCSIEvent);
     return SynchronizedKickEventRoutine(DeviceExtension, (PVOID)EventNode);
     EXIT_FN();
