@@ -10,10 +10,8 @@
  * exits with a distinct code (reset = 32) and the DroidVM daemon relaunches
  * the VM on reset. This driver bridges Windows onto that path:
  *
- *  - It loads as a PnP UPPER FILTER on the rdmapool device (ACPI\RDMA0000,
- *    installed by rdmapool.inf), so it sits in the PnP tree, receives the
- *    system power IRPs sent to that stack, and needs no devnode creation -
- *    plain offline driver injection (DISM) is enough.
+ *  - It binds to a root-enumerated device (ROOT\PVMPOWER, created by the
+ *    installer) so it sits in the PnP tree and receives system power IRPs.
  *  - IRP_MJ_POWER preprocess (KMDF does not surface raw power IRPs): peek the
  *    S5 SET_POWER IRP (SystemState == PowerSystemShutdown) and cache its
  *    ShutdownType (POWER_ACTION) - the documented reboot-vs-poweroff
@@ -24,10 +22,10 @@
  *    reboot was requested (PowerActionShutdownReset), else SYSTEM_OFF
  *    (0x84000008).
  *
- * Platform gate is implicit: ACPI\RDMA0000 exists only on the Gunyah pVM
- * (edk2 generates it from the FDT restricted-DMA-pool node), so on QEMU/KVM
- * or any ACPI-complete platform this driver never loads and Windows' native
- * power paths run unmodified - the same disk image boots elsewhere.
+ * Platform gate: PSCI is only issued when the rdmapool device interface
+ * (ACPI\RDMA0000 - the Gunyah pVM marker) is present. On QEMU/KVM or any
+ * ACPI-complete platform this driver stays inert and Windows' native power
+ * paths run unmodified, so the same disk image boots elsewhere.
  *
  * Copyright (c) 2026
  * SPDX-License-Identifier: BSD-2-Clause-Patent
@@ -35,6 +33,9 @@
 
 #include <ntddk.h>
 #include <wdf.h>
+#include <wdmguid.h>
+#include <initguid.h>
+#include "rdmapool_interface.h" /* GUID_DEVINTERFACE_RDMAPOOL (probe only) */
 
 /* PSCI function IDs (SMC64), conduit "hvc" on this platform. Stub in
  * pvmpower_psci.asm places fn/args in x0-x3 per the C ABI and executes HVC #0. */
@@ -54,6 +55,40 @@ EVT_WDFDEVICE_WDM_IRP_PREPROCESS PvmPowerShutdownIrp;
  * last-chance shutdown. PowerActionNone until an S5 IRP is seen -> defaults to
  * SYSTEM_OFF, which matches the pre-reboot-support behavior. */
 static volatile LONG g_ShutdownAction = PowerActionNone;
+
+/* TRUE once the rdmapool interface (Gunyah pVM marker) has been seen. */
+static volatile LONG g_PlatformIsGunyahPvm = 0;
+
+/*
+ * Probe for the rdmapool device interface. Only ever PROMOTES the cached state
+ * to "present" - an early negative (rdmapool not started yet) is not sticky.
+ * PASSIVE_LEVEL only.
+ */
+static BOOLEAN PvmPowerProbeGunyahPvm(VOID)
+{
+    NTSTATUS status;
+    PWSTR list = NULL;
+
+    if (InterlockedCompareExchange(&g_PlatformIsGunyahPvm, 0, 0) != 0)
+    {
+        return TRUE;
+    }
+    if (KeGetCurrentIrql() != PASSIVE_LEVEL)
+    {
+        return FALSE;
+    }
+
+    status = IoGetDeviceInterfaces(&GUID_DEVINTERFACE_RDMAPOOL, NULL, 0, &list);
+    if (NT_SUCCESS(status) && list != NULL && *list != L'\0')
+    {
+        InterlockedExchange(&g_PlatformIsGunyahPvm, 1);
+    }
+    if (list != NULL)
+    {
+        ExFreePool(list);
+    }
+    return InterlockedCompareExchange(&g_PlatformIsGunyahPvm, 0, 0) != 0;
+}
 
 /*
  * IRP_MJ_POWER preprocess: peek, never complete. Cache the ShutdownType from
@@ -88,19 +123,27 @@ NTSTATUS
 PvmPowerShutdownIrp(_In_ WDFDEVICE Device, _Inout_ PIRP Irp)
 {
     POWER_ACTION action = (POWER_ACTION)InterlockedCompareExchange(&g_ShutdownAction, 0, 0);
-    ULONGLONG fn = (action == PowerActionShutdownReset) ? PSCI_SYSTEM_RESET : PSCI_SYSTEM_OFF;
 
     UNREFERENCED_PARAMETER(Device);
 
-    /* We only load as a filter on ACPI\RDMA0000, so being here == Gunyah pVM. */
-    DbgPrintEx(DPFLTR_DEFAULT_ID,
-               DPFLTR_INFO_LEVEL,
-               "pvmpower: last-chance shutdown, action=%d -> PSCI %s\n",
-               action,
-               fn == PSCI_SYSTEM_RESET ? "SYSTEM_RESET" : "SYSTEM_OFF");
-    (void)PsciHvcCall(fn, 0, 0, 0);
-    /* Should not return (VM reset or powered off). Fall through defensively. */
-    DbgPrintEx(DPFLTR_DEFAULT_ID, DPFLTR_ERROR_LEVEL, "pvmpower: PSCI call returned!\n");
+    if (PvmPowerProbeGunyahPvm())
+    {
+        ULONGLONG fn = (action == PowerActionShutdownReset) ? PSCI_SYSTEM_RESET : PSCI_SYSTEM_OFF;
+        DbgPrintEx(DPFLTR_DEFAULT_ID,
+                   DPFLTR_INFO_LEVEL,
+                   "pvmpower: last-chance shutdown, action=%d -> PSCI %s\n",
+                   action,
+                   fn == PSCI_SYSTEM_RESET ? "SYSTEM_RESET" : "SYSTEM_OFF");
+        (void)PsciHvcCall(fn, 0, 0, 0);
+        /* Should not return (VM reset or powered off). Fall through defensively. */
+        DbgPrintEx(DPFLTR_DEFAULT_ID, DPFLTR_ERROR_LEVEL, "pvmpower: PSCI call returned!\n");
+    }
+    else
+    {
+        DbgPrintEx(DPFLTR_DEFAULT_ID,
+                   DPFLTR_INFO_LEVEL,
+                   "pvmpower: no rdmapool interface (not a Gunyah pVM) - staying inert\n");
+    }
 
     Irp->IoStatus.Status = STATUS_SUCCESS;
     Irp->IoStatus.Information = 0;
@@ -115,10 +158,6 @@ PvmPowerEvtDeviceAdd(_In_ WDFDRIVER Driver, _Inout_ PWDFDEVICE_INIT DeviceInit)
     WDFDEVICE device;
 
     UNREFERENCED_PARAMETER(Driver);
-
-    /* Upper device filter on the rdmapool FDO: pass through everything we do
-     * not explicitly preprocess. */
-    WdfFdoInitSetFilter(DeviceInit);
 
     /* KMDF surfaces neither raw power IRPs nor IRP_MJ_SHUTDOWN; take both as
      * WDM preprocess callbacks. The power callback is peek-and-pass-through. */
@@ -160,7 +199,14 @@ PvmPowerEvtDeviceAdd(_In_ WDFDRIVER Driver, _Inout_ PWDFDEVICE_INIT DeviceInit)
         return status;
     }
 
-    DbgPrintEx(DPFLTR_DEFAULT_ID, DPFLTR_INFO_LEVEL, "pvmpower: loaded (filter on the rdmapool stack)\n");
+    /* Opportunistic platform probe (positive result is cached; a negative here
+     * just means rdmapool has not started yet and we re-probe at shutdown). */
+    (void)PvmPowerProbeGunyahPvm();
+
+    DbgPrintEx(DPFLTR_DEFAULT_ID,
+               DPFLTR_INFO_LEVEL,
+               "pvmpower: loaded (Gunyah pVM marker %s)\n",
+               InterlockedCompareExchange(&g_PlatformIsGunyahPvm, 0, 0) ? "present" : "not seen yet");
     return STATUS_SUCCESS;
 }
 

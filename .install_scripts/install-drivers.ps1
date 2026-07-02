@@ -2,8 +2,7 @@ $ErrorActionPreference='Continue'
 $base = $PSScriptRoot
 Write-Host "DroidVM ARM64 driver installer" -ForegroundColor Cyan
 # NetKVM LAST: on a protected VM, touching a live NIC can bugcheck; do the others first.
-# pvmpower.sys ships inside the rdmapool package (upper filter on ACPI\RDMA0000).
-$order = @('rdmapool','viostor','vioscsi','vioinput','NetKVM')
+$order = @('rdmapool','pvmpower','viostor','vioscsi','vioinput','NetKVM')
 
 function Get-Pkgs {
   $r=@(); $pub=$null
@@ -13,24 +12,15 @@ function Get-Pkgs {
   }
   ,$r
 }
-
-# Clean up the short-lived standalone pvmpower packaging (root-enumerated
-# ROOT\PVMPOWER devnode + its own pvmpower.inf). Both are no-ops if never installed.
-Get-PnpDevice -ErrorAction SilentlyContinue | Where-Object { $_.InstanceId -like 'ROOT\PVMPOWER\*' } | ForEach-Object {
-  Write-Host ("remove legacy pvmpower devnode " + $_.InstanceId)
-  pnputil /remove-device $_.InstanceId | Out-Null
-}
-Get-Pkgs | Where-Object { $_.Orig -eq 'pvmpower.inf' } | ForEach-Object {
-  Write-Host ("remove legacy pvmpower package " + $_.Pub)
-  pnputil /delete-driver $_.Pub /uninstall | Out-Null
-}
-
 foreach($d in $order){
   $inf = Get-ChildItem (Join-Path $base "drivers\$d") -Filter *.inf -ErrorAction SilentlyContinue | Select-Object -First 1
   if(-not $inf){ Write-Host "skip $d (no inf found)" -ForegroundColor Yellow; continue }
   $orig = $inf.Name.ToLower()
   Write-Host ""
   Write-Host ("== install " + $d + " : " + $inf.Name + " ==") -ForegroundColor Cyan
+  # pvmpower binds to a root-enumerated ROOT\PVMPOWER device; create the devnode
+  # (idempotent, also cleans filter-era leftovers) before installing its package.
+  if($d -eq 'pvmpower'){ & (Join-Path $base 'pvmpower-devnode.ps1') }
   $before = @(Get-Pkgs | Where-Object { $_.Orig -eq $orig } | ForEach-Object Pub)
   pnputil /add-driver $inf.FullName /install | Write-Host
   $after = @(Get-Pkgs | Where-Object { $_.Orig -eq $orig } | ForEach-Object Pub)
