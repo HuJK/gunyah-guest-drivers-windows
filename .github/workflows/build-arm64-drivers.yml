@@ -95,7 +95,8 @@ jobs:
             @{ p='viorng/viorng/viorng.vcxproj';            c='Win11 Release'; plat='ARM64' },
             @{ p='viosock/sys/viosock.vcxproj';             c='Win11 Release'; plat='ARM64' },
             @{ p='NetKVM/NetKVM-VS2015.vcxproj';            c='Win11 Release'; plat='ARM64' },
-            @{ p='rdmapool/rdmapool.vcxproj';               c='Release';       plat='ARM64' }
+            @{ p='rdmapool/rdmapool.vcxproj';               c='Release';       plat='ARM64' },
+            @{ p='pvmpower/pvmpower.vcxproj';               c='Release';       plat='ARM64' }
           )
           $failed = @()
           foreach ($j in $jobs) {
@@ -154,7 +155,8 @@ jobs:
             @{ n='viosock';   root='viosock';   bins=@('viosock.sys','viosocklib.dll','viosockwspsvc.exe'); inf='viosock.inf' },
             @{ n='NetKVM';    root='NetKVM';    bins=@('netkvm.sys','netkvmp.exe'); inf='netkvm.inf' },
             @{ n='vioinput';  root='vioinput';  bins=@('vioinput.sys','viohidkmdf.sys'); inf='vioinput.inf' },
-            @{ n='rdmapool';  root='rdmapool';  bins=@('rdmapool.sys'); inf='rdmapool.inf' }
+            @{ n='rdmapool';  root='rdmapool';  bins=@('rdmapool.sys'); inf='rdmapool.inf' },
+            @{ n='pvmpower';  root='pvmpower';  bins=@('pvmpower.sys'); inf='pvmpower.inf' }
           )
           # 在 root 下找最佳檔案：優先路徑含 ARM64、最新修改
           function Pick($root,$file) {
@@ -228,8 +230,8 @@ jobs:
             Write-Host "packed $($d.n): $has"
           }
           # --- bundle installer into the artifact (source: .install_scripts/) ---
-          # INSTALL.cmd (UAC launcher) + install-drivers.ps1 install the 5 restricted-DMA-pool
-          # drivers (rdmapool, viostor, vioscsi, vioinput, NetKVM -- NetKVM last) and remove
+          # INSTALL.cmd (UAC launcher) + install-drivers.ps1 install the 6 pVM drivers
+          # (rdmapool, pvmpower, viostor, vioscsi, vioinput, NetKVM -- NetKVM last) and remove
           # older versions.
           Copy-Item .install_scripts\INSTALL.cmd, .install_scripts\install-drivers.ps1 out\ -Force
           Write-Host "[pkg] bundled out\INSTALL.cmd + out\install-drivers.ps1"
