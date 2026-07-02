@@ -18,12 +18,21 @@ CParaNdisCX::CParaNdisCX(PPARANDIS_ADAPTER Context)
 
 CParaNdisCX::~CParaNdisCX()
 {
-    CLockedContext<CNdisSpinLock> autoLock(m_Lock);
+    {
+        CLockedContext<CNdisSpinLock> autoLock(m_Lock);
+        m_CommandQueue.ForEachDetached([&](CQueuedCommand *e) {
+            CQueuedCommand::Destroy(e, m_Context->MiniportHandle);
+        });
+    }
+    /* Free the control-queue DMA buffer OUTSIDE the spin lock: the restricted-
+     * DMA-pool free is an IOCTL that needs PASSIVE_LEVEL (at DISPATCH it would
+     * silently leak the page on every halt), and NdisMFreeSharedMemory wants
+     * PASSIVE_LEVEL too. The destructor runs single-threaded at halt, so the
+     * lock is not needed for m_ControlData. */
     if (m_ControlData.Virtual != nullptr)
     {
         ParaNdis_FreePhysicalMemory(m_Context, &m_ControlData);
     }
-    m_CommandQueue.ForEachDetached([&](CQueuedCommand *e) { CQueuedCommand::Destroy(e, m_Context->MiniportHandle); });
 }
 
 bool CParaNdisCX::Create(UINT DeviceQueueIndex)

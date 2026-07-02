@@ -1646,7 +1646,10 @@ static VOID ParaNdis_CleanupContext(PARANDIS_ADAPTER *pContext)
 
     virtio_device_shutdown(&pContext->IODevice);
 
-    ParaNdis_RdmaPoolDisconnect(pContext);
+    /* NOTE: rdmapool disconnect intentionally does NOT happen here. It runs in
+     * ~CRdmaPoolAutoDisconnect (the adapter's first data member, hence the
+     * last destructor), after members like CXPath have freed their pool
+     * memory. See ndis56common.h. */
 }
 
 /**********************************************************
@@ -2560,4 +2563,12 @@ _PARANDIS_ADAPTER::~_PARANDIS_ADAPTER()
 {
     guestAnnouncePackets.Clear();
     ParaNdis_CleanupContext(this);
+}
+
+_PARANDIS_ADAPTER::CRdmaPoolAutoDisconnect::~CRdmaPoolAutoDisconnect()
+{
+    if (m_pContext != nullptr)
+    {
+        ParaNdis_RdmaPoolDisconnect(m_pContext);
+    }
 }

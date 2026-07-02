@@ -494,6 +494,18 @@ struct _PARANDIS_ADAPTER : public CNdisAllocatable<_PARANDIS_ADAPTER, 'DCTX'>
         m_StateMachine.RegisterFlow(m_CxStateMachine);
     }
     ~_PARANDIS_ADAPTER();
+    /* MUST stay the FIRST data member: C++ destroys members in reverse
+     * declaration order, so this disconnects from the restricted DMA pool
+     * only after every other member's destructor (CXPath's control data,
+     * virtqueues, ...) has returned its pool memory. Disconnecting earlier
+     * (as ParaNdis_CleanupContext used to) made those late frees route to
+     * NdisMFreeSharedMemory on pool VAs -> ndis.sys bugcheck on halt
+     * (NIC disable / driver update). Armed by ParaNdis_RdmaPoolConnect. */
+    struct CRdmaPoolAutoDisconnect
+    {
+        struct _PARANDIS_ADAPTER *m_pContext = nullptr;
+        ~CRdmaPoolAutoDisconnect();
+    } RdmaPoolAutoDisconnect;
     NDIS_HANDLE MiniportHandle = NULL;
     NDIS_HANDLE InterruptHandle = NULL;
     NDIS_HANDLE BufferListsPool = NULL;

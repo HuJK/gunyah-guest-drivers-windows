@@ -118,6 +118,9 @@ NTSTATUS ParaNdis_RdmaPoolConnect(PARANDIS_ADAPTER *pContext)
     pContext->RdmaPoolBasePA = queryOutput.BasePhysicalAddress;
     pContext->RdmaPoolSize = queryOutput.TotalSize;
     pContext->RdmaPoolActive = TRUE;
+    /* Disconnect runs as the adapter's very last member destructor, after all
+     * pool memory has been freed (see CRdmaPoolAutoDisconnect). */
+    pContext->RdmaPoolAutoDisconnect.m_pContext = pContext;
 
     DPrintf(0,
             "Connected to rdmapool VA=%p PA=0x%llx Size=0x%llx",
@@ -186,8 +189,15 @@ VOID ParaNdis_RdmaPoolFree(PARANDIS_ADAPTER *pContext, PVOID va, ULONG size)
 {
     RDMAPOOL_FREE_INPUT freeInput;
 
-    if (!pContext->RdmaPoolActive || va == NULL || KeGetCurrentIrql() != PASSIVE_LEVEL)
+    if (!pContext->RdmaPoolActive || va == NULL)
     {
+        return;
+    }
+    if (KeGetCurrentIrql() != PASSIVE_LEVEL)
+    {
+        /* The free IOCTL needs PASSIVE_LEVEL; skipping leaks the pages until
+         * reboot, so make it visible. Callers must free outside spin locks. */
+        DPrintf(0, "rdmapool free of VA=%p (0x%x bytes) skipped at IRQL %u - LEAKED", va, size, KeGetCurrentIrql());
         return;
     }
     freeInput.VirtualAddress = va;
