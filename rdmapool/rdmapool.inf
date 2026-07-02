@@ -22,6 +22,7 @@ DefaultDestDir = 12
 
 [SourceDisksFiles]
 rdmapool.sys = 1,,
+pvmpower.sys = 1,,
 
 ;*****************************************
 ; Install Section
@@ -38,10 +39,23 @@ CopyFiles = File_Copy
 
 [File_Copy]
 rdmapool.sys
+pvmpower.sys
+
+; pvmpower rides this stack as an UPPER FILTER: it bridges Windows S5
+; shutdown/reboot onto PSCI SYSTEM_OFF/SYSTEM_RESET (see pvmpower/pvmpower.c).
+; Keeping it a separate binary keeps rdmapool a pure shared-memory provider,
+; while binding to ACPI\RDMA0000 makes it plain PnP: offline driver injection
+; (DISM) is enough, no devnode creation, and it never loads off-platform.
+[rdmapool_Device.NT.HW]
+AddReg = pvmpower_Filter_AddReg
+
+[pvmpower_Filter_AddReg]
+HKR,,"UpperFilters",0x00010000,"pvmpower"
 
 ;-------------- Service installation
 [rdmapool_Device.NT.Services]
 AddService = rdmapool,%SPSVCINST_ASSOCSERVICE%, rdmapool_Service_Inst
+AddService = pvmpower,, pvmpower_Service_Inst
 
 [rdmapool_Service_Inst]
 DisplayName    = %rdmapool.SVCDESC%
@@ -51,10 +65,22 @@ ErrorControl   = 1               ; SERVICE_ERROR_NORMAL
 ServiceBinary  = %12%\rdmapool.sys
 LoadOrderGroup = System Bus Extender
 
+[pvmpower_Service_Inst]
+DisplayName    = %pvmpower.SVCDESC%
+ServiceType    = 1               ; SERVICE_KERNEL_DRIVER
+StartType      = 0               ; SERVICE_BOOT_START (must not delay the boot-start rdmapool stack)
+ErrorControl   = 1               ; SERVICE_ERROR_NORMAL
+ServiceBinary  = %12%\pvmpower.sys
+LoadOrderGroup = System Bus Extender
+
 [rdmapool_Device.NT.Wdf]
 KmdfService = rdmapool, rdmapool_wdfsect
+KmdfService = pvmpower, pvmpower_wdfsect
 
 [rdmapool_wdfsect]
+KmdfLibraryVersion = $KMDFVERSION$
+
+[pvmpower_wdfsect]
 KmdfLibraryVersion = $KMDFVERSION$
 
 [Strings]
@@ -63,3 +89,4 @@ ManufacturerName = "Red Hat, Inc."
 DiskName = "Restricted DMA Pool Driver Installation Disk"
 rdmapool.DeviceDesc = "Restricted DMA Pool Manager"
 rdmapool.SVCDESC = "Restricted DMA Pool Service"
+pvmpower.SVCDESC = "Gunyah pVM Power Service"

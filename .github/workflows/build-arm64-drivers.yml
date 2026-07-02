@@ -155,9 +155,11 @@ jobs:
             @{ n='viosock';   root='viosock';   bins=@('viosock.sys','viosocklib.dll','viosockwspsvc.exe'); inf='viosock.inf' },
             @{ n='NetKVM';    root='NetKVM';    bins=@('netkvm.sys','netkvmp.exe'); inf='netkvm.inf' },
             @{ n='vioinput';  root='vioinput';  bins=@('vioinput.sys','viohidkmdf.sys'); inf='vioinput.inf' },
-            @{ n='rdmapool';  root='rdmapool';  bins=@('rdmapool.sys'); inf='rdmapool.inf' },
-            @{ n='pvmpower';  root='pvmpower';  bins=@('pvmpower.sys'); inf='pvmpower.inf' }
+            @{ n='rdmapool';  root='rdmapool';  bins=@('rdmapool.sys','pvmpower.sys'); inf='rdmapool.inf' }
           )
+          # pvmpower.sys 是 rdmapool 套件的一部分（ACPI\RDMA0000 的 upper filter，
+          # 由 rdmapool.inf 安裝），但由獨立的 pvmpower/ 專案編譯 —— Pick 找不到時
+          # 會 fallback 到整棵樹搜尋。
           # 在 root 下找最佳檔案：優先路徑含 ARM64、最新修改
           function Pick($root,$file) {
             Get-ChildItem $root -Recurse -Filter $file -File -EA SilentlyContinue |
@@ -180,6 +182,7 @@ jobs:
             $ok = $true
             foreach ($b in $d.bins) {
               $f = Pick $d.root $b
+              if (-not $f) { $f = Pick '.' $b }   # 跨資料夾的套件成員（如 rdmapool 套件裡的 pvmpower.sys）
               if ($f) { Copy-Item $f.FullName $dest -Force } else { Write-Host "::warning::$($d.n): 缺 $b"; $ok=$false }
             }
             # 取 inf（優先 ARM64 已 stamp；否則 source 模板）
