@@ -19,26 +19,26 @@
 
 /*
  * Control slot layout (one page). Holds the device-visible request metadata
- * that must live in rdmapool: out_hdr, status, and (for GET_ID) the serial
- * buffer. Indirect descriptors are disabled on the rdmapool path, so no
- * indirect table is needed here. DISCARD is not negotiated on this path, so
- * no discard area.
+ * that must live in rdmapool: out_hdr, status, the serial buffer (GET_ID) and
+ * the discard segment list (UNMAP). Indirect descriptors are disabled on the
+ * rdmapool path, so no indirect table is needed here.
  */
-#define BOUNCE_CTL_PAGES         1
-#define BOUNCE_CTL_SIZE          (BOUNCE_CTL_PAGES * PAGE_SIZE)
-#define BOUNCE_CTL_OUTHDR_OFFSET 0
-#define BOUNCE_CTL_STATUS_OFFSET 16 /* sizeof(blk_outhdr) = u32 + u32 + u64 */
-#define BOUNCE_CTL_SN_OFFSET     32 /* BLOCK_SERIAL_STRLEN (20) bytes */
+#define BOUNCE_CTL_PAGES          1
+#define BOUNCE_CTL_SIZE           (BOUNCE_CTL_PAGES * PAGE_SIZE)
+#define BOUNCE_CTL_OUTHDR_OFFSET  0
+#define BOUNCE_CTL_STATUS_OFFSET  16 /* sizeof(blk_outhdr) = u32 + u32 + u64 */
+#define BOUNCE_CTL_SN_OFFSET      32 /* BLOCK_SERIAL_STRLEN (20) bytes */
+#define BOUNCE_CTL_DISCARD_OFFSET 64 /* MAX_DISCARD_SEGMENTS (16) x 16-byte blk_discard_write_zeroes = 256 bytes */
 
 /*
  * Default contiguous data chunk size. Large enough that typical transfers map
  * to a handful of descriptors (1MB -> ceil(1MB/chunk)), not 256 per-page
  * descriptors. Clamped down to the device size_max at init.
  */
-#define BOUNCE_DATA_CHUNK_SIZE   (256 * 1024)
+#define BOUNCE_DATA_CHUNK_SIZE    (256 * 1024)
 
 /* Default gentle poll interval; registry PollIntervalUs overrides (0 = tight spin). */
-#define VIOSTOR_POLL_INTERVAL_US RDMA_CLIENT_POLL_INTERVAL_US
+#define VIOSTOR_POLL_INTERVAL_US  RDMA_CLIENT_POLL_INTERVAL_US
 
 /*
  * Connect to the rdmapool driver and allocate one contiguous region big enough
