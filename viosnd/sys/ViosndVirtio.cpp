@@ -1689,10 +1689,13 @@ ViosndRecordRdmaState(
     }
     if (!NT_SUCCESS(RtlStringCchPrintfW(text,
                                         SIZEOF_ARRAY(text),
-                                        L"%s (0x%08x), region=%I64u bytes",
+                                        L"%s (0x%08x), got=%I64u bytes, "
+                                        L"asked=%u pages, pool=%I64u bytes",
                                         What,
                                         Status,
-                                        Device->Rdma.Client.Size))) {
+                                        Device->Rdma.Client.Size,
+                                        Device->Rdma.Client.LastRequestedPages,
+                                        Device->Rdma.Client.LastPoolTotalSize))) {
         return;
     }
     ViosndWriteDeviceDiagString(Device->PhysicalDeviceObject, L"RdmaPool", text);

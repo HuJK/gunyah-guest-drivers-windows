@@ -83,6 +83,8 @@ NTSTATUS RdmaClientConnectEx(PRDMA_CLIENT c, const char *Tag, ULONG RingPages, U
 
     c->Active = FALSE;
     c->Tag = Tag ? Tag : "rdmaclient";
+    c->LastPoolTotalSize = 0;
+    c->LastRequestedPages = 0;
 
     status = IoGetDeviceInterfaces(&GUID_DEVINTERFACE_RDMAPOOL, NULL, 0, &deviceInterfaceList);
     if (!NT_SUCCESS(status) || deviceInterfaceList == NULL || *deviceInterfaceList == L'\0')
@@ -118,6 +120,7 @@ NTSTATUS RdmaClientConnectEx(PRDMA_CLIENT c, const char *Tag, ULONG RingPages, U
     }
 
     poolPages = (ULONG)(queryOutput.TotalSize / PAGE_SIZE);
+    c->LastPoolTotalSize = queryOutput.TotalSize;
 
     /* Region = vrings + caller metadata (control slots / event area) + a data
      * area capped at MaxDataPages / half the pool (the pool is shared with the
@@ -132,6 +135,7 @@ NTSTATUS RdmaClientConnectEx(PRDMA_CLIENT c, const char *Tag, ULONG RingPages, U
     RtlZeroMemory(&allocInput, sizeof(allocInput));
     RtlZeroMemory(&allocOutput, sizeof(allocOutput));
     allocInput.NumPages = totalPages;
+    c->LastRequestedPages = totalPages;
     status = RdmaClientIoctl(c,
                              (ULONG)IOCTL_RDMAPOOL_ALLOCATE,
                              &allocInput,

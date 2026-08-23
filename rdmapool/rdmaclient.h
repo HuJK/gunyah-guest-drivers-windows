@@ -54,6 +54,11 @@ typedef struct _RDMA_CLIENT
     PVOID BaseVA;
     PHYSICAL_ADDRESS BasePA;
     ULONG64 Size;
+    /* What the last connect attempt saw and asked for. Kept even when the attempt failed: a
+     * refused allocation is only interpretable next to the size of the pool it was refused
+     * from, and by then the connect has returned and the numbers are otherwise gone. */
+    ULONG64 LastPoolTotalSize;
+    ULONG LastRequestedPages;
 
     /* --- bounce sub-allocator (RdmaClientBounceInit) --- */
     PUCHAR EventBaseVA; /* reserved EventBytes area, or NULL */
