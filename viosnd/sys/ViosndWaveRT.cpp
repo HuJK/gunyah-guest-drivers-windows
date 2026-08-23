@@ -2020,14 +2020,18 @@ CViosndMiniportWaveRTStream::SetState(_In_ KSSTATE State)
                 m_State = oldState;
             }
         } else {
-            if (InterlockedCompareExchange((volatile LONG *)&ViosndCaptureFaulted, 0, 0) != 0) {
-                VIOSND_LOG(DPFLTR_IHVDRIVER_ID,
-                           DPFLTR_ERROR_LEVEL,
-                           "viosnd: stream %u capture start rejected; capture faulted\n",
-                           m_StreamId);
-                ViosndRecordDiag(m_Device, L"CaptureStart", L"rejected: capture faulted latch set");
-                return STATUS_DEVICE_NOT_READY;
-            }
+            /*
+             * ViosndCaptureFaulted is no longer a reason to refuse.
+             *
+             * It is a process-wide latch, set when a capture stream failed to stop or release,
+             * and once set it turned every later attempt to open capture -- on any stream, on
+             * any card -- into STATUS_DEVICE_NOT_READY until the driver was reloaded. That made
+             * one transient failure permanent and global, which is a worse outcome than the
+             * failure it was guarding against. The recovery it was standing in for is now done
+             * directly below: the stream is stopped and released before it is configured, so a
+             * device left in a bad state by the previous stream is put right rather than
+             * remembered. The latch stays as a record of the fault having happened.
+             */
             m_PacketNumber = 0;
             m_NextSubmitPacket = 0;
             m_NextReadPacket = 0;
@@ -2041,6 +2045,26 @@ CViosndMiniportWaveRTStream::SetState(_In_ KSSTATE State)
             NTSTATUS configureStatus;
             NTSTATUS startStatus = STATUS_UNSUCCESSFUL;
             NTSTATUS workerStatus = STATUS_UNSUCCESSFUL;
+
+            /*
+             * Put the device back to a state SET_PARAMS is legal from, whatever the last stream
+             * left behind.
+             *
+             * virtio-snd's stream states run SET_PARAMS -> PREPARE -> START -> STOP -> RELEASE,
+             * and SET_PARAMS from STARTED is refused. A previous stream that failed to stop --
+             * which this driver's own stop path gives up on after a timeout -- leaves the device
+             * STARTED, and then every later attempt to open the stream is rejected:
+             *
+             *   Invalid PCM state transition from VIRTIO_SND_R_PCM_START to
+             *   VIRTIO_SND_R_PCM_SET_PARAMS
+             *
+             * The endpoint stays present and returns silence, permanently, until the VM is
+             * restarted. Both calls are expected to fail when the stream was already idle, which
+             * is why neither status is examined: this is about the state the device is in, not
+             * about whether these two particular messages succeeded.
+             */
+            (VOID)ViosndStopPcm(m_Device, m_StreamId);
+            (VOID)ViosndReleasePcm(m_Device, m_StreamId);
 
             configureStatus = ViosndConfigureDefaultPcm(m_Device, m_StreamId);
             status = configureStatus;
