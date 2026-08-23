@@ -52,24 +52,29 @@ extern "C"
  * Device-visible payload. Per stream viosnd stages VIOSND_RENDER_IO_POOL_SIZE
  * (12) plus VIOSND_CAPTURE_IO_POOL_SIZE (8) period buffers, each
  * sizeof(VIRTIO_SND_PCM_XFER) + one packet; a shared-mode WASAPI packet at
- * 48kHz stereo 16-bit is ~2KB and rarely exceeds 8KB, so a stream costs well
- * under 256KB, and with the control and event buffers a card wants around half
- * a megabyte.
+ * 48kHz stereo 16-bit is ~2KB and rarely exceeds 8KB, so a stream's own
+ * staging costs well under 256KB.
  *
- * This asked for 4MB. The headroom was free while there was room to spare, and
- * it is the first thing to go when there is not: viostor takes half the pool
- * outright, NetKVM allocates from it per buffer with no ceiling, and a second
- * sound card was enough to leave no 4MB run anywhere -- both cards then failed
- * to start. Ask for what a card actually uses.
+ * 4MB is what a card gets when the pool has room, and it is more than the
+ * arithmetic above needs -- but the arithmetic only covers stream staging, and
+ * the device also allocates control and event buffers before any stream
+ * exists. Cutting this to 512KB on the strength of the stream figure alone
+ * made every card fail at QueryPcmStreams with STATUS_INSUFFICIENT_RESOURCES:
+ * the rings took 256KB of it and device init could not finish in the rest.
+ *
+ * So the size stays generous and the retry below is what handles a crowded
+ * pool, rather than a smaller request that is wrong whenever there is room.
  */
-#define VIOSND_RDMA_DATA_PAGES 128u
+#define VIOSND_RDMA_DATA_PAGES 1024u
 
 /*
- * The smallest region worth having: rings plus enough staging for a couple of
- * periods per stream. Below this the device would be present and stuttering,
- * which is worse than absent.
+ * The floor for the retry. Not a guess at what is comfortable: 128 pages is
+ * measured to fail during device init, so the floor sits well above it. Below
+ * this the driver refuses rather than reaching a size that cannot finish
+ * starting -- a card that fails at init with a recorded reason is easier to
+ * deal with than one that starts and does not work.
  */
-#define VIOSND_RDMA_MIN_DATA_PAGES 32u
+#define VIOSND_RDMA_MIN_DATA_PAGES 512u
 
 typedef struct _VIOSND_RDMA
 {
