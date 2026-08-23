@@ -319,6 +319,121 @@ ViosndRegisterAudioEndpoint(
     return status;
 }
 
+/* How many of the endpoints the host offered actually became something Windows can see. The two
+ * numbers differing is the whole point of recording it: a dropped endpoint is otherwise
+ * indistinguishable from a host that never offered one. */
+static VOID
+ViosndWriteEndpointCountDiag(
+    _In_ PDEVICE_OBJECT PhysicalDeviceObject,
+    _In_z_ PCWSTR ValueName,
+    _In_ ULONG Registered,
+    _In_ ULONG Offered)
+{
+    WCHAR text[64];
+
+    if (NT_SUCCESS(RtlStringCchPrintfW(text,
+                                       SIZEOF_ARRAY(text),
+                                       L"%u of %u registered",
+                                       Registered,
+                                       Offered))) {
+        ViosndWriteDeviceDiagString(PhysicalDeviceObject, ValueName, text);
+    }
+}
+
+/*
+ * The names Windows binds a subdevice to. They come from static strings in the INF, so this
+ * table and the INF have to agree, and its length is what actually limits how many endpoints a
+ * card can show. Index 0 keeps the unsuffixed names: an upgrade that renamed it would orphan
+ * whatever volume and default the user had set on the endpoint they already had.
+ */
+static PCWSTR const ViosndRenderWaveNames[] = {
+    VIOSND_WAVEOUT_NAME,
+    L"XCBVirtioAudioWaveOut2",
+    L"XCBVirtioAudioWaveOut3",
+    L"XCBVirtioAudioWaveOut4"
+};
+
+static PCWSTR const ViosndRenderTopologyNames[] = {
+    VIOSND_TOPOOUT_NAME,
+    L"XCBVirtioAudioTopologyOut2",
+    L"XCBVirtioAudioTopologyOut3",
+    L"XCBVirtioAudioTopologyOut4"
+};
+
+static PCWSTR const ViosndCaptureWaveNames[] = {
+    VIOSND_WAVEIN_NAME,
+    L"XCBVirtioAudioWaveIn2",
+    L"XCBVirtioAudioWaveIn3",
+    L"XCBVirtioAudioWaveIn4"
+};
+
+static PCWSTR const ViosndCaptureTopologyNames[] = {
+    VIOSND_TOPOIN_NAME,
+    L"XCBVirtioAudioTopologyIn2",
+    L"XCBVirtioAudioTopologyIn3",
+    L"XCBVirtioAudioTopologyIn4"
+};
+
+C_ASSERT(SIZEOF_ARRAY(ViosndRenderWaveNames) == VIOSND_MAX_ENDPOINTS);
+C_ASSERT(SIZEOF_ARRAY(ViosndRenderTopologyNames) == VIOSND_MAX_ENDPOINTS);
+C_ASSERT(SIZEOF_ARRAY(ViosndCaptureWaveNames) == VIOSND_MAX_ENDPOINTS);
+C_ASSERT(SIZEOF_ARRAY(ViosndCaptureTopologyNames) == VIOSND_MAX_ENDPOINTS);
+
+/*
+ * Registers every endpoint in one direction. An endpoint that fails to register is reported and
+ * skipped rather than taking the others down with it: one host device that offered a format
+ * Windows cannot express is not a reason for the card to have no audio at all. Only having
+ * nothing left at the end is a failure.
+ */
+static NTSTATUS
+ViosndRegisterDirection(
+    _In_ PDEVICE_OBJECT DeviceObject,
+    _In_ PIRP Irp,
+    _In_ PRESOURCELIST ResourceList,
+    _In_ PVIOSND_DEVICE Device,
+    _In_reads_(Count) const VIOSND_ENDPOINT *Endpoints,
+    _In_ ULONG Count,
+    _In_ PCWSTR const *TopologyNames,
+    _In_ PCWSTR const *WaveNames,
+    _Out_ PULONG Registered)
+{
+    NTSTATUS lastFailure = STATUS_SUCCESS;
+
+    *Registered = 0;
+    if (Count > VIOSND_MAX_ENDPOINTS) {
+        VIOSND_LOG(DPFLTR_IHVDRIVER_ID,
+                   DPFLTR_ERROR_LEVEL,
+                   "viosnd: %u endpoints offered, %u names available; the rest are dropped\n",
+                   Count,
+                   VIOSND_MAX_ENDPOINTS);
+        Count = VIOSND_MAX_ENDPOINTS;
+    }
+
+    for (ULONG i = 0; i < Count; ++i) {
+        NTSTATUS status = ViosndRegisterAudioEndpoint(DeviceObject,
+                                                      Irp,
+                                                      ResourceList,
+                                                      Device,
+                                                      &Endpoints[i],
+                                                      (PWSTR)TopologyNames[i],
+                                                      (PWSTR)WaveNames[i]);
+        if (NT_SUCCESS(status)) {
+            (*Registered)++;
+        } else {
+            lastFailure = status;
+            VIOSND_LOG(DPFLTR_IHVDRIVER_ID,
+                       DPFLTR_ERROR_LEVEL,
+                       "viosnd: endpoint %u (%ws) failed to register 0x%08x\n",
+                       i,
+                       WaveNames[i],
+                       status);
+        }
+    }
+
+    return *Registered != 0 ? STATUS_SUCCESS : lastFailure;
+}
+
+
 extern "C"
 NTSTATUS
 XcbVirtioAudioStartDevice(
@@ -329,8 +444,6 @@ XcbVirtioAudioStartDevice(
     NTSTATUS status;
     PVIOSND_DEVICE device;
     PDEVICE_OBJECT physicalDeviceObject;
-    /* One endpoint per direction is registered: the subdevice names Windows binds come from
-     * static strings in the INF, so the rest of the set is enumerated but not exposed yet. */
     VIOSND_ENDPOINT_SET endpoints;
     ULONG endpointRole;
     BOOLEAN enableRender;
@@ -423,25 +536,41 @@ XcbVirtioAudioStartDevice(
     }
 
     if (enableRender && endpoints.RenderCount != 0) {
-        status = ViosndRegisterAudioEndpoint(DeviceObject,
-                                             Irp,
-                                             ResourceList,
-                                             device,
-                                             &endpoints.Render[0],
-                                             VIOSND_TOPOOUT_NAME,
-                                             VIOSND_WAVEOUT_NAME);
+        ULONG registered = 0;
+
+        status = ViosndRegisterDirection(DeviceObject,
+                                         Irp,
+                                         ResourceList,
+                                         device,
+                                         endpoints.Render,
+                                         endpoints.RenderCount,
+                                         ViosndRenderTopologyNames,
+                                         ViosndRenderWaveNames,
+                                         &registered);
         ViosndWriteDeviceInitDiag(physicalDeviceObject, L"RegisterRender", status);
+        ViosndWriteEndpointCountDiag(physicalDeviceObject,
+                                     L"RenderEndpoints",
+                                     registered,
+                                     endpoints.RenderCount);
     }
 
     if (NT_SUCCESS(status) && enableCapture && endpoints.CaptureCount != 0) {
-        status = ViosndRegisterAudioEndpoint(DeviceObject,
-                                             Irp,
-                                             ResourceList,
-                                             device,
-                                             &endpoints.Capture[0],
-                                             VIOSND_TOPOIN_NAME,
-                                             VIOSND_WAVEIN_NAME);
+        ULONG registered = 0;
+
+        status = ViosndRegisterDirection(DeviceObject,
+                                         Irp,
+                                         ResourceList,
+                                         device,
+                                         endpoints.Capture,
+                                         endpoints.CaptureCount,
+                                         ViosndCaptureTopologyNames,
+                                         ViosndCaptureWaveNames,
+                                         &registered);
         ViosndWriteDeviceInitDiag(physicalDeviceObject, L"RegisterCapture", status);
+        ViosndWriteEndpointCountDiag(physicalDeviceObject,
+                                     L"CaptureEndpoints",
+                                     registered,
+                                     endpoints.CaptureCount);
     }
 
     if (!NT_SUCCESS(status)) {
