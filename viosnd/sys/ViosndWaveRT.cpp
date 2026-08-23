@@ -2230,7 +2230,21 @@ CViosndMiniportWaveRTStream::SetState(_In_ KSSTATE State)
                 m_CaptureInFlight = 0;
                 m_OutstandingWrites = 0;
                 FreeCaptureIoPool();
-                prepareStatus = ViosndConfigureDefaultPcm(m_Device, m_StreamId);
+                /*
+                 * Deliberately not configuring the stream again here.
+                 *
+                 * This used to re-run SET_PARAMS and PREPARE straight after the release, to have
+                 * the stream ready for the next RUN. PREPARE is what makes the host open its
+                 * microphone, so the effect was that closing a recording application released
+                 * the stream and reopened it fourteen milliseconds later -- and left it open.
+                 * On Android that means the recording indicator stays lit for as long as the VM
+                 * runs, once anything in it has ever recorded, which is a privacy signal saying
+                 * something untrue.
+                 *
+                 * Nothing is lost: the start path stops and releases the stream before
+                 * configuring it, so it does not depend on having been prepared in advance.
+                 */
+                prepareStatus = STATUS_SUCCESS;
             } else {
                 InterlockedExchange((volatile LONG *)&ViosndCaptureFaulted, 1);
             }
