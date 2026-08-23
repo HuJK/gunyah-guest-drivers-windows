@@ -2162,17 +2162,27 @@ CViosndMiniportWaveRTStream::SetState(_In_ KSSTATE State)
             }
 
             /*
-             * QEMU's input STOP path can block in AUD_set_active_in() while RX
-             * buffers are still queued. RELEASE is required to flush pending
-             * I/O, so use it as the capture quiesce operation and then prepare
-             * the stream for the next RUN.
+             * STOP, then RELEASE. Both, in that order.
+             *
+             * This used to send RELEASE alone, on the reasoning that RELEASE is what flushes
+             * pending I/O and QEMU's input STOP could block while RX buffers were still queued.
+             * The spec does not allow it: RELEASE is only legal from PREPARE or STOP, and a
+             * device that enforces that -- crosvm does -- refuses it outright:
+             *
+             *   Invalid PCM state transition from VIRTIO_SND_R_PCM_START to
+             *   VIRTIO_SND_R_PCM_RELEASE
+             *
+             * The refusal was then treated as a fault, latched process-wide, and the stream was
+             * left STARTED, so the next attempt to open capture had SET_PARAMS refused for the
+             * same reason. That is the whole of why capture worked at most once.
              */
             VIOSND_LOG(DPFLTR_IHVDRIVER_ID,
                        DPFLTR_ERROR_LEVEL,
-                       "viosnd: stream %u capture release pcm begin workerStopped=%u inFlight=%u\n",
+                       "viosnd: stream %u capture stop/release begin workerStopped=%u inFlight=%u\n",
                        m_StreamId,
                        workerStopped,
                        m_CaptureInFlight);
+            (VOID)ViosndStopPcm(m_Device, m_StreamId);
             releaseStatus = ViosndReleasePcm(m_Device, m_StreamId);
             if (NT_SUCCESS(releaseStatus)) {
                 ReclaimCapturePackets();
@@ -2201,6 +2211,20 @@ CViosndMiniportWaveRTStream::SetState(_In_ KSSTATE State)
                        prepareStatus,
                        workerStopped,
                        InterlockedCompareExchange((volatile LONG *)&ViosndCaptureFaulted, 0, 0));
+            {
+                WCHAR text[160];
+
+                if (NT_SUCCESS(RtlStringCchPrintfW(text,
+                                                   SIZEOF_ARRAY(text),
+                                                   L"release=0x%08x prepare=0x%08x detached=%u "
+                                                   L"workerStopped=%u",
+                                                   releaseStatus,
+                                                   prepareStatus,
+                                                   detached,
+                                                   workerStopped))) {
+                    ViosndRecordDiag(m_Device, L"CaptureStop", text);
+                }
+            }
             status = STATUS_SUCCESS;
         } else {
             NTSTATUS stopStatus;
