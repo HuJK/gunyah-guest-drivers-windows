@@ -4,7 +4,17 @@ enum {
     VIOSND_NODE_DAC_ADC = 0
 };
 
-#define VIOSND_RENDER_IO_POOL_SIZE 12u
+/*
+ * The deepest queue the host can ask for, and so the size of both IO pools.
+ *
+ * The two used to be written separately -- 12 for render, 8 for capture -- and the capture one
+ * was below the deepest setting the host offers. Choosing it gave the speaker the depth asked
+ * for and the microphone whatever fitted, with nothing to say the two had been treated
+ * differently. Deriving both from one number is what stops that drifting apart again.
+ */
+#define VIOSND_MAX_OUTSTANDING_PACKETS 12u
+
+#define VIOSND_RENDER_IO_POOL_SIZE VIOSND_MAX_OUTSTANDING_PACKETS
 #define VIOSND_RENDER_TARGET_OUTSTANDING_PACKETS 8u
 /* How much audio the render pump keeps in flight. Two packets is ~21ms at the
  * default 2048-byte period, and anything that keeps the pump off the CPU for
@@ -20,7 +30,7 @@ enum {
 #define VIOSND_RENDER_FALLBACK_OUTSTANDING_PACKETS 6u
 #define VIOSND_RENDER_START_PREROLL_PACKETS 2u
 #define VIOSND_RENDER_CYCLIC_PREROLL_PACKETS VIOSND_RENDER_START_PREROLL_PACKETS
-#define VIOSND_CAPTURE_IO_POOL_SIZE 8u
+#define VIOSND_CAPTURE_IO_POOL_SIZE VIOSND_MAX_OUTSTANDING_PACKETS
 /* Poll loops between capture diagnostic writes; roughly one second. */
 #define VIOSND_CAPTURE_DIAG_INTERVAL_LOOPS 100u
 #define VIOSND_CAPTURE_TARGET_OUTSTANDING_PACKETS 4u
