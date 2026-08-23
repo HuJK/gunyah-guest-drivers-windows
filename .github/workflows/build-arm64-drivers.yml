@@ -66,7 +66,12 @@ jobs:
           # 對未用 Driver.RHEL.props 的專案（如 rdmapool）此 /p: 是未使用屬性，無副作用。
           # versioning epoch = base commit. 開關：設為空字串 '' 或 $null 即關閉自增，
           # 第四段固定落回 58000（相當於 +0）。設為某個 commit 時，其後每個 commit +1。
-          $epoch = ''   # DISABLED：空/None => +0 => 100.6.101.58000
+          # ENABLED at the viosnd import: every build is now strictly newer than the
+          # 58000 currently in service, so pnputil /add-driver /install is an ordinary
+          # upgrade. That matters most for viostor: it is the boot disk's driver, and
+          # the only way to replace a same-versioned one is to uninstall it first --
+          # out from under the running system.
+          $epoch = '7604c911'
           if ([string]::IsNullOrWhiteSpace($epoch)) {
               $n = '0'
           } else {

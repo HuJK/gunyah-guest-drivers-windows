@@ -80,6 +80,12 @@ static VOID
 ViosndRecordVendorConfig(
     _In_ PVIOSND_DEVICE Device);
 
+static VOID
+ViosndRecordRdmaState(
+    _In_ PVIOSND_DEVICE Device,
+    _In_z_ PCWSTR What,
+    _In_ NTSTATUS Status);
+
 static NTSTATUS
 ViosndPnpCompletion(
     _In_ PDEVICE_OBJECT DeviceObject,
@@ -1374,11 +1380,35 @@ ViosndCreateDevice(
     status = ViosndRdmaConnect(&device->Rdma,
                                VIOSND_RDMA_RING_PAGES,
                                VIOSND_RDMA_DATA_PAGES);
-    if (!NT_SUCCESS(status)) {
+    if (NT_SUCCESS(status)) {
+        ViosndRecordRdmaState(device, L"active", status);
+    } else if (status == STATUS_NOT_FOUND) {
+        /* No pool device in the system at all. That is what an unprotected -- or
+         * pseudo-unprotected -- VM looks like: its RAM is shared rather than lent, so ordinary
+         * DMA is reachable by the host and is the right thing to use. */
         VIOSND_LOG(DPFLTR_IHVDRIVER_ID,
                    DPFLTR_ERROR_LEVEL,
-                   "viosnd: rdmapool unavailable (0x%08x), using normal DMA\n",
+                   "viosnd: no rdmapool device; assuming the host can reach normal DMA\n");
+        ViosndRecordRdmaState(device, L"absent; normal DMA", status);
+    } else {
+        /*
+         * The pool exists but we could not take a region of it. Carrying on with ordinary DMA
+         * used to be the behaviour here, and it cannot work: in a protected VM that memory is
+         * lent to the hypervisor, so the host cannot read the vrings placed in it, and the
+         * device fails at activate with "host access to lent memory region" -- a message on the
+         * host, about a decision made in the guest, with nothing in between to connect them.
+         *
+         * Refusing to start is worse for exactly one case and better for every other: the
+         * device is gone rather than present-and-mute, and the reason is written down.
+         */
+        VIOSND_LOG(DPFLTR_IHVDRIVER_ID,
+                   DPFLTR_ERROR_LEVEL,
+                   "viosnd: rdmapool present but unusable (0x%08x); refusing to start, because "
+                   "normal DMA is not host-readable in a protected VM\n",
                    status);
+        ViosndRecordRdmaState(device, L"present but unusable", status);
+        ViosndDestroyDevice(device);
+        return status;
     }
 
     status = ViosndMapBars(device, ResourceList);
@@ -1644,6 +1674,30 @@ ViosndFetchPcmInfo(
  * the host's settings reach the driver" does not exist anywhere. It is exactly the question
  * that gets asked after the fact.
  */
+/* Records what became of the restricted DMA pool, which decides whether anything this device
+ * puts in memory is readable by the host at all. */
+static VOID
+ViosndRecordRdmaState(
+    _In_ PVIOSND_DEVICE Device,
+    _In_z_ PCWSTR What,
+    _In_ NTSTATUS Status)
+{
+    WCHAR text[128];
+
+    if (Device->PhysicalDeviceObject == NULL) {
+        return;
+    }
+    if (!NT_SUCCESS(RtlStringCchPrintfW(text,
+                                        SIZEOF_ARRAY(text),
+                                        L"%s (0x%08x), region=%I64u bytes",
+                                        What,
+                                        Status,
+                                        Device->Rdma.Client.Size))) {
+        return;
+    }
+    ViosndWriteDeviceDiagString(Device->PhysicalDeviceObject, L"RdmaPool", text);
+}
+
 static VOID
 ViosndRecordVendorConfig(
     _In_ PVIOSND_DEVICE Device)
