@@ -33,6 +33,11 @@ typedef struct _VIOSND_ENDPOINT {
     /* Whether the host actually named it, as opposed to this being the driver's own pick.
      * Only diagnostics depend on the difference. */
     BOOLEAN PreferredFromHost;
+    /* VIOSND_ENDPOINT_KIND_*, as the host described it. */
+    ULONG Kind;
+    /* The KS node type that kind maps to. This is what decides the name Windows shows for the
+     * endpoint and the icon beside it, so it is the whole reason the kind is carried at all. */
+    const GUID *NodeType;
 } VIOSND_ENDPOINT, *PVIOSND_ENDPOINT;
 
 typedef struct _VIOSND_ENDPOINT_SET {

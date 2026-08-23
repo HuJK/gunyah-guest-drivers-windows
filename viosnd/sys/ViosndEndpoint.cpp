@@ -1,16 +1,54 @@
 // SPDX-License-Identifier: BSD-3-Clause
 #include "precomp.h"
 
+/*
+ * The KS node type an endpoint kind presents as.
+ *
+ * Windows builds the endpoint's displayed name from this, and picks the icon beside it from the
+ * same place -- so a headset that presents as KSNODETYPE_SPEAKER is not merely mislabelled, it
+ * is indistinguishable from the phone's own speaker in the list the user picks from. Falling
+ * back on direction alone is what the driver did before, and it is why every endpoint read
+ * "Speakers" no matter what was on the other end.
+ */
+static const GUID *
+ViosndNodeTypeForKind(
+    _In_ ULONG Kind,
+    _In_ BOOLEAN Capture)
+{
+    switch (Kind) {
+    case VIOSND_ENDPOINT_KIND_SPEAKER:
+        return &KSNODETYPE_SPEAKER;
+    case VIOSND_ENDPOINT_KIND_HEADPHONES:
+        return &KSNODETYPE_HEADPHONES;
+    case VIOSND_ENDPOINT_KIND_HEADSET:
+        return Capture ? &KSNODETYPE_MICROPHONE : &KSNODETYPE_HEADSET;
+    case VIOSND_ENDPOINT_KIND_LINE_OUT:
+        return &KSNODETYPE_LINE_CONNECTOR;
+    case VIOSND_ENDPOINT_KIND_DIGITAL:
+        return &KSNODETYPE_SPDIF_INTERFACE;
+    case VIOSND_ENDPOINT_KIND_MICROPHONE:
+        return &KSNODETYPE_MICROPHONE;
+    case VIOSND_ENDPOINT_KIND_TELEPHONY:
+        return &KSNODETYPE_TELEPHONE;
+    default:
+        /* The host said nothing. Direction is all that is left, and it is what the driver used
+         * to assume for everything. */
+        return Capture ? &KSNODETYPE_MICROPHONE : &KSNODETYPE_SPEAKER;
+    }
+}
+
 static VOID
 ViosndHostHint(
     _In_opt_ const VIOSND_VENDOR_CONFIG *VendorConfig,
     _In_ BOOLEAN Capture,
     _In_ ULONG DeviceIndex,
     _Out_ PULONG Rate,
-    _Out_ PUCHAR Channels)
+    _Out_ PUCHAR Channels,
+    _Out_ PULONG Kind)
 {
     *Rate = 0;
     *Channels = 0;
+    *Kind = VIOSND_ENDPOINT_KIND_UNKNOWN;
 
     if (VendorConfig == NULL || VendorConfig->version < 2u) {
         return;
@@ -30,6 +68,7 @@ ViosndHostHint(
     }
     *Rate = table[DeviceIndex].rate;
     *Channels = (UCHAR)min(table[DeviceIndex].channels, 255u);
+    *Kind = table[DeviceIndex].kind;
 }
 
 static PVIOSND_ENDPOINT
@@ -105,7 +144,8 @@ ViosndGroupEndpoints(
 
         ULONG hintRate;
         UCHAR hintChannels;
-        ViosndHostHint(VendorConfig, capture, deviceIndex, &hintRate, &hintChannels);
+        ULONG hintKind;
+        ViosndHostHint(VendorConfig, capture, deviceIndex, &hintRate, &hintChannels, &hintKind);
 
         VIOSND_WAVE_FORMAT preferred;
         if (!ViosndPickPreferred(&caps, hintRate, hintChannels, &preferred)) {
@@ -135,14 +175,17 @@ ViosndGroupEndpoints(
         endpoint->Preferred = preferred;
         endpoint->PreferredFromHost =
             (hintRate != 0 && preferred.SampleRate == hintRate) ? TRUE : FALSE;
+        endpoint->Kind = hintKind;
+        endpoint->NodeType = ViosndNodeTypeForKind(hintKind, capture);
         (*count)++;
 
         VIOSND_LOG(DPFLTR_IHVDRIVER_ID,
                    DPFLTR_ERROR_LEVEL,
-                   "viosnd: %s endpoint %u <- stream %u, default %uHz %uch %ubit%s\n",
+                   "viosnd: %s endpoint %u <- stream %u, kind=%u, default %uHz %uch %ubit%s\n",
                    capture ? "capture" : "render",
                    deviceIndex,
                    i,
+                   hintKind,
                    preferred.SampleRate,
                    preferred.Channels,
                    preferred.ContainerBits,

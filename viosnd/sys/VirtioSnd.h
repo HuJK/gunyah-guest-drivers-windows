@@ -35,9 +35,25 @@ typedef struct virtio_snd_config {
 /* Per-direction cap on the preferred-format hints, matching the host's block. */
 #define VIOSND_VENDOR_CFG_MAX_DEVICES 8u
 
+/* What sort of thing a host endpoint is. Deliberately coarse: it has to mean the same to every
+ * guest, so it names what a listener would recognise rather than the host's device taxonomy.
+ * virtio-snd's own jacks cannot carry this -- they describe connectors on the emulated card,
+ * not the host endpoint behind it. */
+enum {
+    VIOSND_ENDPOINT_KIND_UNKNOWN = 0,
+    VIOSND_ENDPOINT_KIND_SPEAKER = 1,
+    VIOSND_ENDPOINT_KIND_HEADPHONES = 2,
+    VIOSND_ENDPOINT_KIND_HEADSET = 3,
+    VIOSND_ENDPOINT_KIND_LINE_OUT = 4,
+    VIOSND_ENDPOINT_KIND_DIGITAL = 5,
+    VIOSND_ENDPOINT_KIND_MICROPHONE = 6,
+    VIOSND_ENDPOINT_KIND_TELEPHONY = 7
+};
+
 typedef struct viosnd_vendor_preferred {
     u32 rate;     /* the host endpoint's own sample rate; 0 = unknown */
     u32 channels; /* the host endpoint's own channel count; 0 = unknown */
+    u32 kind;     /* VIOSND_ENDPOINT_KIND_*; 0 = unknown */
 } VIOSND_VENDOR_PREFERRED, *PVIOSND_VENDOR_PREFERRED;
 
 /* Version 1 stops after period_bytes. */
