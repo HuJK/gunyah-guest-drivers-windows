@@ -11,6 +11,5 @@ enum {
 NTSTATUS
 ViosndCreateWaveRTMiniport(
     _In_ PVIOSND_DEVICE Device,
-    _In_ ULONG StreamId,
-    _In_ BOOLEAN Capture,
+    _In_ const VIOSND_ENDPOINT *Endpoint,
     _Outptr_ PMINIPORT *Miniport);

@@ -57,6 +57,14 @@ ViosndQueryPcmStreams(
     _Inout_ PVIOSND_DEVICE Device,
     _Out_ PVIOSND_STREAM_PAIR Pair);
 
+/* Configures a stream with a format the pin negotiated. The Default/Fallback pair below are the
+ * fixed formats used where nothing negotiated one. */
+NTSTATUS
+ViosndConfigurePcm(
+    _Inout_ PVIOSND_DEVICE Device,
+    _In_ ULONG StreamId,
+    _In_ const VIOSND_PCM_FORMAT *Format);
+
 NTSTATUS
 ViosndConfigureDefaultPcm(
     _Inout_ PVIOSND_DEVICE Device,

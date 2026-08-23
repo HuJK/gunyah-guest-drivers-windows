@@ -1852,6 +1852,15 @@ ViosndConfigurePcmFormat(
 }
 
 NTSTATUS
+ViosndConfigurePcm(
+    _Inout_ PVIOSND_DEVICE Device,
+    _In_ ULONG StreamId,
+    _In_ const VIOSND_PCM_FORMAT *Format)
+{
+    return ViosndConfigurePcmFormat(Device, StreamId, Format);
+}
+
+NTSTATUS
 ViosndConfigureDefaultPcm(
     _Inout_ PVIOSND_DEVICE Device,
     _In_ ULONG StreamId)

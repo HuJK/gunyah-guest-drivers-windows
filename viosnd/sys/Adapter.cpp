@@ -147,8 +147,7 @@ ViosndCreateAndRegisterWaveRTSubdevice(
     _In_ PIRP Irp,
     _In_ PRESOURCELIST ResourceList,
     _In_ PVIOSND_DEVICE Device,
-    _In_ ULONG StreamId,
-    _In_ BOOLEAN Capture,
+    _In_ const VIOSND_ENDPOINT *Endpoint,
     _In_ PWSTR Name,
     _Out_ PVIOSND_SUBDEVICE Subdevice)
 {
@@ -166,7 +165,7 @@ ViosndCreateAndRegisterWaveRTSubdevice(
         return status;
     }
 
-    status = ViosndCreateWaveRTMiniport(Device, StreamId, Capture, &Subdevice->Miniport);
+    status = ViosndCreateWaveRTMiniport(Device, Endpoint, &Subdevice->Miniport);
     if (NT_SUCCESS(status)) {
         status = Subdevice->Port->Init(DeviceObject,
                                        Irp,
@@ -263,8 +262,7 @@ ViosndRegisterAudioEndpoint(
     _In_ PIRP Irp,
     _In_ PRESOURCELIST ResourceList,
     _In_ PVIOSND_DEVICE Device,
-    _In_ ULONG StreamId,
-    _In_ BOOLEAN Capture,
+    _In_ const VIOSND_ENDPOINT *Endpoint,
     _In_ PWSTR TopologyName,
     _In_ PWSTR WaveName)
 {
@@ -278,7 +276,7 @@ ViosndRegisterAudioEndpoint(
     status = ViosndCreateAndRegisterTopologySubdevice(DeviceObject,
                                                       Irp,
                                                       ResourceList,
-                                                      Capture,
+                                                      Endpoint->Capture,
                                                       TopologyName,
                                                       &topology);
     if (!NT_SUCCESS(status)) {
@@ -289,12 +287,11 @@ ViosndRegisterAudioEndpoint(
                                                     Irp,
                                                     ResourceList,
                                                     Device,
-                                                    StreamId,
-                                                    Capture,
+                                                    Endpoint,
                                                     WaveName,
                                                     &wave);
     if (NT_SUCCESS(status)) {
-        if (Capture) {
+        if (Endpoint->Capture) {
             status = PcRegisterPhysicalConnection(DeviceObject,
                                                   topology.Port,
                                                   VIOSND_TOPO_PIN_BRIDGE,
@@ -332,7 +329,9 @@ XcbVirtioAudioStartDevice(
     NTSTATUS status;
     PVIOSND_DEVICE device;
     PDEVICE_OBJECT physicalDeviceObject;
-    VIOSND_STREAM_PAIR streams;
+    /* One endpoint per direction is registered: the subdevice names Windows binds come from
+     * static strings in the INF, so the rest of the set is enumerated but not exposed yet. */
+    VIOSND_ENDPOINT_SET endpoints;
     ULONG endpointRole;
     BOOLEAN enableRender;
     BOOLEAN enableCapture;
@@ -373,8 +372,8 @@ XcbVirtioAudioStartDevice(
     status = ViosndInitializeDevice(device);
     ViosndWriteDeviceInitDiag(physicalDeviceObject, L"InitializeDevice", status);
     if (NT_SUCCESS(status)) {
-        status = ViosndQueryPcmStreams(device, &streams);
-        ViosndWriteDeviceInitDiag(physicalDeviceObject, L"QueryPcmStreams", status);
+        status = ViosndEnumerateEndpoints(device, &endpoints);
+        ViosndWriteDeviceInitDiag(physicalDeviceObject, L"EnumerateEndpoints", status);
     }
 
     if (!NT_SUCCESS(status)) {
@@ -391,8 +390,8 @@ XcbVirtioAudioStartDevice(
     // direction so that each can be pinned to its own host endpoint. Expose the intersection of
     // what was asked for and what exists; only having nothing left to expose is a failure.
     if (NT_SUCCESS(status)) {
-        enableRender = enableRender && streams.HasRender;
-        enableCapture = enableCapture && streams.HasCapture;
+        enableRender = enableRender && endpoints.RenderCount != 0;
+        enableCapture = enableCapture && endpoints.CaptureCount != 0;
         if (!enableRender && !enableCapture) {
             status = STATUS_DEVICE_CONFIGURATION_ERROR;
             ViosndWriteDeviceInitDiag(physicalDeviceObject, L"NoUsableStream", status);
@@ -404,10 +403,10 @@ XcbVirtioAudioStartDevice(
         VIOSND_LOG(DPFLTR_IHVDRIVER_ID,
                    DPFLTR_ERROR_LEVEL,
                    "viosnd: defer PCM configure render=%u/%u capture=%u/%u\n",
-                   streams.HasRender,
-                   streams.RenderStreamId,
-                   streams.HasCapture,
-                   streams.CaptureStreamId);
+                   endpoints.RenderCount,
+                   endpoints.RenderCount != 0 ? endpoints.Render[0].StreamId : 0,
+                   endpoints.CaptureCount,
+                   endpoints.CaptureCount != 0 ? endpoints.Capture[0].StreamId : 0);
     }
 
     if (!NT_SUCCESS(status)) {
@@ -415,33 +414,31 @@ XcbVirtioAudioStartDevice(
                    DPFLTR_ERROR_LEVEL,
                    "viosnd: configure PCM failed 0x%08x render=%u/%u capture=%u/%u\n",
                    status,
-                   streams.HasRender,
-                   streams.RenderStreamId,
-                   streams.HasCapture,
-                   streams.CaptureStreamId);
+                   endpoints.RenderCount,
+                   endpoints.RenderCount != 0 ? endpoints.Render[0].StreamId : 0,
+                   endpoints.CaptureCount,
+                   endpoints.CaptureCount != 0 ? endpoints.Capture[0].StreamId : 0);
         ViosndDestroyDevice(device);
         return status;
     }
 
-    if (enableRender && streams.HasRender) {
+    if (enableRender && endpoints.RenderCount != 0) {
         status = ViosndRegisterAudioEndpoint(DeviceObject,
                                              Irp,
                                              ResourceList,
                                              device,
-                                             streams.RenderStreamId,
-                                             FALSE,
+                                             &endpoints.Render[0],
                                              VIOSND_TOPOOUT_NAME,
                                              VIOSND_WAVEOUT_NAME);
         ViosndWriteDeviceInitDiag(physicalDeviceObject, L"RegisterRender", status);
     }
 
-    if (NT_SUCCESS(status) && enableCapture && streams.HasCapture) {
+    if (NT_SUCCESS(status) && enableCapture && endpoints.CaptureCount != 0) {
         status = ViosndRegisterAudioEndpoint(DeviceObject,
                                              Irp,
                                              ResourceList,
                                              device,
-                                             streams.CaptureStreamId,
-                                             TRUE,
+                                             &endpoints.Capture[0],
                                              VIOSND_TOPOIN_NAME,
                                              VIOSND_WAVEIN_NAME);
         ViosndWriteDeviceInitDiag(physicalDeviceObject, L"RegisterCapture", status);

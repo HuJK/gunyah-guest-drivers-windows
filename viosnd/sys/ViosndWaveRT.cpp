@@ -49,7 +49,7 @@ enum {
 #define VIOSND_FALLBACK_TRIGGER_PERCENT 65u
 
 static volatile LONG ViosndCaptureFaulted;
-static UCHAR ViosndSilencePeriod[VIOSND_DEFAULT_PERIOD_BYTES];
+static UCHAR ViosndSilencePeriod[VIOSND_MAX_PERIOD_BYTES];
 
 static KSDATARANGE_AUDIO ViosndPinDataRangesStream[] = {
     {
@@ -220,35 +220,81 @@ static PCFILTER_DESCRIPTOR ViosndCaptureFilterDescriptor = {
     NULL
 };
 
+/* A period is whole frames of the stream's own format, and the same duration whatever that
+ * format is. Clamped so it always fits the static silence buffer. */
+static ULONG
+ViosndPeriodBytesForFormat(
+    _In_ const VIOSND_WAVE_FORMAT *Format)
+{
+    ULONG frameBytes = ViosndFrameBytes(Format);
+    ULONG period;
+
+    if (frameBytes == 0) {
+        return VIOSND_DEFAULT_PERIOD_BYTES;
+    }
+    period = VIOSND_PERIOD_FRAMES * frameBytes;
+    if (period > VIOSND_MAX_PERIOD_BYTES) {
+        period = (VIOSND_MAX_PERIOD_BYTES / frameBytes) * frameBytes;
+    }
+    return period != 0 ? period : VIOSND_DEFAULT_PERIOD_BYTES;
+}
+
+/* The channel mask Windows expects beside a channel count. Anything past the ones with a named
+ * layout gets the first N channels, which is what KSAUDIO's own tables do. */
+static ULONG
+ViosndChannelMask(
+    _In_ UCHAR Channels)
+{
+    switch (Channels) {
+    case 1:
+        return KSAUDIO_SPEAKER_MONO;
+    case 2:
+        return KSAUDIO_SPEAKER_STEREO;
+    case 4:
+        return KSAUDIO_SPEAKER_QUAD;
+    case 6:
+        return KSAUDIO_SPEAKER_5POINT1;
+    case 8:
+        return KSAUDIO_SPEAKER_7POINT1_SURROUND;
+    default:
+        return 0;
+    }
+}
+
+/* Renders a negotiated format into the shape the port driver hands around. */
 static VOID
-ViosndBuildDefaultFormat(
+ViosndBuildWaveFormat(
+    _In_ const VIOSND_WAVE_FORMAT *Wave,
     _Out_ PKSDATAFORMAT_WAVEFORMATEXTENSIBLE Format)
 {
     RtlZeroMemory(Format, sizeof(*Format));
     Format->DataFormat.FormatSize = sizeof(*Format);
     Format->DataFormat.MajorFormat = KSDATAFORMAT_TYPE_AUDIO;
-    Format->DataFormat.SubFormat = KSDATAFORMAT_SUBTYPE_PCM;
+    Format->DataFormat.SubFormat =
+        Wave->Float ? KSDATAFORMAT_SUBTYPE_IEEE_FLOAT : KSDATAFORMAT_SUBTYPE_PCM;
     Format->DataFormat.Specifier = KSDATAFORMAT_SPECIFIER_WAVEFORMATEX;
     Format->WaveFormatExt.Format.wFormatTag = WAVE_FORMAT_EXTENSIBLE;
-    Format->WaveFormatExt.Format.nChannels = VIOSND_DEFAULT_CHANNELS;
-    Format->WaveFormatExt.Format.nSamplesPerSec = VIOSND_DEFAULT_SAMPLE_RATE;
-    Format->WaveFormatExt.Format.wBitsPerSample = VIOSND_DEFAULT_BITS_PER_SAMPLE;
-    Format->WaveFormatExt.Format.nBlockAlign =
-        (VIOSND_DEFAULT_CHANNELS * VIOSND_DEFAULT_BITS_PER_SAMPLE) / 8;
+    Format->WaveFormatExt.Format.nChannels = Wave->Channels;
+    Format->WaveFormatExt.Format.nSamplesPerSec = Wave->SampleRate;
+    Format->WaveFormatExt.Format.wBitsPerSample = Wave->ContainerBits;
+    Format->WaveFormatExt.Format.nBlockAlign = (USHORT)ViosndFrameBytes(Wave);
     Format->WaveFormatExt.Format.nAvgBytesPerSec =
-        Format->WaveFormatExt.Format.nSamplesPerSec * Format->WaveFormatExt.Format.nBlockAlign;
+        Wave->SampleRate * Format->WaveFormatExt.Format.nBlockAlign;
     Format->WaveFormatExt.Format.cbSize = sizeof(WAVEFORMATEXTENSIBLE) - sizeof(WAVEFORMATEX);
-    Format->WaveFormatExt.Samples.wValidBitsPerSample = VIOSND_DEFAULT_BITS_PER_SAMPLE;
-    Format->WaveFormatExt.dwChannelMask = KSAUDIO_SPEAKER_STEREO;
-    Format->WaveFormatExt.SubFormat = KSDATAFORMAT_SUBTYPE_PCM;
+    Format->WaveFormatExt.Samples.wValidBitsPerSample = Wave->ValidBits;
+    Format->WaveFormatExt.dwChannelMask = ViosndChannelMask(Wave->Channels);
+    Format->WaveFormatExt.SubFormat =
+        Wave->Float ? KSDATAFORMAT_SUBTYPE_IEEE_FLOAT : KSDATAFORMAT_SUBTYPE_PCM;
 }
 
+/* Resolves what the port asked for against what the stream can carry. */
 static BOOLEAN
-ViosndIsDefaultFormat(
-    _In_opt_ PKSDATAFORMAT DataFormat)
+ViosndResolveDataFormat(
+    _In_opt_ PKSDATAFORMAT DataFormat,
+    _In_ const VIOSND_FORMAT_CAPS *Caps,
+    _Out_ PVIOSND_WAVE_FORMAT Out)
 {
-    PWAVEFORMATEX waveFormat;
-    ULONG blockAlign = (VIOSND_DEFAULT_CHANNELS * VIOSND_DEFAULT_BITS_PER_SAMPLE) / 8;
+    RtlZeroMemory(Out, sizeof(*Out));
 
     if (DataFormat == NULL ||
         !IsEqualGUIDAligned(DataFormat->MajorFormat, KSDATAFORMAT_TYPE_AUDIO) ||
@@ -257,35 +303,9 @@ ViosndIsDefaultFormat(
         return FALSE;
     }
 
-    waveFormat = &((PKSDATAFORMAT_WAVEFORMATEX)DataFormat)->WaveFormatEx;
-    if (waveFormat->nChannels != VIOSND_DEFAULT_CHANNELS ||
-        waveFormat->nSamplesPerSec != VIOSND_DEFAULT_SAMPLE_RATE ||
-        waveFormat->wBitsPerSample != VIOSND_DEFAULT_BITS_PER_SAMPLE ||
-        waveFormat->nBlockAlign != blockAlign ||
-        waveFormat->nAvgBytesPerSec != VIOSND_DEFAULT_SAMPLE_RATE * blockAlign) {
-        return FALSE;
-    }
-
-    if (waveFormat->wFormatTag == WAVE_FORMAT_PCM) {
-        return IsEqualGUIDAligned(DataFormat->SubFormat, KSDATAFORMAT_SUBTYPE_PCM)
-                   ? TRUE
-                   : FALSE;
-    }
-
-    if (waveFormat->wFormatTag == WAVE_FORMAT_EXTENSIBLE &&
-        DataFormat->FormatSize >= sizeof(KSDATAFORMAT_WAVEFORMATEXTENSIBLE)) {
-        PKSDATAFORMAT_WAVEFORMATEXTENSIBLE extensible =
-            (PKSDATAFORMAT_WAVEFORMATEXTENSIBLE)DataFormat;
-
-        return extensible->WaveFormatExt.Samples.wValidBitsPerSample ==
-                       VIOSND_DEFAULT_BITS_PER_SAMPLE &&
-                   IsEqualGUIDAligned(extensible->WaveFormatExt.SubFormat,
-                                      KSDATAFORMAT_SUBTYPE_PCM)
-                   ? TRUE
-                   : FALSE;
-    }
-
-    return FALSE;
+    return ViosndFormatFromWave(&((PKSDATAFORMAT_WAVEFORMATEX)DataFormat)->WaveFormatEx,
+                                Caps,
+                                Out);
 }
 
 static ULONG
@@ -356,42 +376,47 @@ ViosndHasWritableRenderPacket(
            ViosndPacketNumberLessOrEqual(NextSubmitPacket, LastOsWritePacket);
 }
 
+/* Whole periods of the stream's own format. At the default format PeriodBytes is 2048 and all
+ * three of these behave exactly as they did when that number was written into them. */
 static ULONG
 ViosndPacketSizeFromNotificationCount(
     _In_ ULONG BufferSize,
-    _In_ ULONG NotificationCount)
+    _In_ ULONG NotificationCount,
+    _In_ ULONG PeriodBytes)
 {
     UNREFERENCED_PARAMETER(NotificationCount);
 
-    if (BufferSize < VIOSND_DEFAULT_PERIOD_BYTES) {
+    if (BufferSize < PeriodBytes) {
         return BufferSize;
     }
 
-    return VIOSND_DEFAULT_PERIOD_BYTES;
+    return PeriodBytes;
 }
 
 static ULONG
 ViosndNotificationCountFromBufferSize(
-    _In_ ULONG BufferSize)
+    _In_ ULONG BufferSize,
+    _In_ ULONG PeriodBytes)
 {
-    if (BufferSize == 0) {
+    if (BufferSize == 0 || PeriodBytes == 0) {
         return 0;
     }
 
-    return max(BufferSize / VIOSND_DEFAULT_PERIOD_BYTES, 1u);
+    return max(BufferSize / PeriodBytes, 1u);
 }
 
 static ULONG
 ViosndUsableBufferSizeFromAllocatedSize(
-    _In_ ULONG AllocatedSize)
+    _In_ ULONG AllocatedSize,
+    _In_ ULONG PeriodBytes)
 {
-    if (AllocatedSize < VIOSND_DEFAULT_PERIOD_BYTES) {
+    if (PeriodBytes == 0 || AllocatedSize < PeriodBytes) {
         return AllocatedSize;
     }
 
-    ULONG notificationCount = ViosndNotificationCountFromBufferSize(AllocatedSize);
+    ULONG notificationCount = ViosndNotificationCountFromBufferSize(AllocatedSize, PeriodBytes);
 
-    return notificationCount * VIOSND_DEFAULT_PERIOD_BYTES;
+    return notificationCount * PeriodBytes;
 }
 
 static ULONGLONG
@@ -526,7 +551,8 @@ public:
         _In_ CViosndMiniportWaveRT *Miniport,
         _In_ PVIOSND_DEVICE Device,
         _In_ ULONG StreamId,
-        _In_ BOOLEAN Capture);
+        _In_ BOOLEAN Capture,
+        _In_ const VIOSND_WAVE_FORMAT *Format);
 
     IMP_IMiniportWaveRTStream;
     IMP_IMiniportWaveRTStreamNotification;
@@ -595,6 +621,12 @@ private:
     BOOLEAN m_WorkerStarted;
     BOOLEAN m_RenderFallbackActive;
     BOOLEAN m_RenderFallbackAttempted;
+    /* The format this stream negotiated, and the period in bytes that follows from it. Every
+     * buffer size, packet size and SET_PARAMS on this stream is derived from these two. */
+    VIOSND_WAVE_FORMAT m_WaveFormat;
+    ULONG m_PeriodBytes;
+
+    NTSTATUS ConfigureNegotiatedPcm();
 
     NTSTATUS SubmitRenderPacket(_In_ ULONG PacketNumber, _In_ ULONG PacketLength);
     NTSTATUS SubmitRenderSilencePacket(_In_ ULONG PacketNumber);
@@ -618,7 +650,7 @@ private:
 class CViosndMiniportWaveRT : public IMiniportWaveRT
 {
 public:
-    CViosndMiniportWaveRT(_In_ PVIOSND_DEVICE Device, _In_ ULONG StreamId, _In_ BOOLEAN Capture);
+    CViosndMiniportWaveRT(_In_ PVIOSND_DEVICE Device, _In_ const VIOSND_ENDPOINT *Endpoint);
 
     IMP_IMiniportWaveRT;
 
@@ -627,6 +659,12 @@ public:
     STDMETHODIMP_(ULONG) Release();
 
     BOOLEAN IsCapture() const { return m_Capture; }
+    const VIOSND_FORMAT_CAPS *Caps() const { return &m_Endpoint.Caps; }
+    const VIOSND_WAVE_FORMAT *Preferred() const { return &m_Endpoint.Preferred; }
+
+    /* Builds the filter this endpoint will show. Separate from the constructor because it
+     * allocates, and a constructor has nowhere to put the failure. */
+    NTSTATUS BuildDescription();
 
 private:
     LONG m_RefCount;
@@ -634,13 +672,24 @@ private:
     ULONG m_StreamId;
     BOOLEAN m_Capture;
     PPORTWAVERT m_Port;
+    /* What the host said this endpoint is, and what it can carry. */
+    VIOSND_ENDPOINT m_Endpoint;
+    /* The pin's data ranges, built from the endpoint's caps. One allocation, owned here for as
+     * long as the filter that points at it. */
+    PKSDATARANGE *m_RangePointers;
+    ULONG m_RangeCount;
+    /* A per-instance copy of the static description, so two endpoints on one device can offer
+     * different formats. The static tables stay as the template. */
+    PCPIN_DESCRIPTOR m_Pins[2];
+    PCFILTER_DESCRIPTOR m_Filter;
 };
 
 CViosndMiniportWaveRTStream::CViosndMiniportWaveRTStream(
     _In_ CViosndMiniportWaveRT *Miniport,
     _In_ PVIOSND_DEVICE Device,
     _In_ ULONG StreamId,
-    _In_ BOOLEAN Capture) :
+    _In_ BOOLEAN Capture,
+    _In_ const VIOSND_WAVE_FORMAT *Format) :
     m_RefCount(1),
     m_Miniport(Miniport),
     m_Device(Device),
@@ -691,8 +740,11 @@ CViosndMiniportWaveRTStream::CViosndMiniportWaveRTStream(
     m_ThreadObject(NULL),
     m_WorkerStarted(FALSE),
     m_RenderFallbackActive(FALSE),
-    m_RenderFallbackAttempted(FALSE)
+    m_RenderFallbackAttempted(FALSE),
+    m_PeriodBytes(0)
 {
+    m_WaveFormat = *Format;
+    m_PeriodBytes = ViosndPeriodBytesForFormat(&m_WaveFormat);
     KeInitializeEvent(&m_StopEvent, NotificationEvent, FALSE);
     KeInitializeEvent(&m_KickEvent, SynchronizationEvent, FALSE);
     RtlZeroMemory(m_RenderIoPool, sizeof(m_RenderIoPool));
@@ -762,10 +814,38 @@ CViosndMiniportWaveRTStream::Release()
     return (ULONG)count;
 }
 
+NTSTATUS
+CViosndMiniportWaveRTStream::ConfigureNegotiatedPcm()
+{
+    VIOSND_PCM_FORMAT format;
+
+    ViosndPcmFormatFromWave(&m_WaveFormat,
+                            m_PeriodBytes,
+                            m_NotificationCount != 0 ? m_NotificationCount : 1,
+                            &format);
+    return ViosndConfigurePcm(m_Device, m_StreamId, &format);
+}
+
 STDMETHODIMP_(NTSTATUS)
 CViosndMiniportWaveRTStream::SetFormat(_In_ PKSDATAFORMAT DataFormat)
 {
-    return ViosndIsDefaultFormat(DataFormat) ? STATUS_SUCCESS : STATUS_NO_MATCH;
+    VIOSND_WAVE_FORMAT wave;
+
+    if (!ViosndResolveDataFormat(DataFormat, m_Miniport->Caps(), &wave)) {
+        return STATUS_NO_MATCH;
+    }
+
+    /* The period follows from the format, and the buffer was cut into periods when it was
+     * allocated. Changing one without the other would leave every position this stream reports
+     * describing a buffer that is no longer there, so a format change after allocation is only
+     * allowed when it changes nothing. */
+    if (m_Buffer != NULL && RtlCompareMemory(&wave, &m_WaveFormat, sizeof(wave)) != sizeof(wave)) {
+        return STATUS_NO_MATCH;
+    }
+
+    m_WaveFormat = wave;
+    m_PeriodBytes = ViosndPeriodBytesForFormat(&wave);
+    return STATUS_SUCCESS;
 }
 
 NTSTATUS
@@ -2056,7 +2136,7 @@ CViosndMiniportWaveRTStream::SetState(_In_ KSSTATE State)
             m_RunStartPosition = 0;
             m_RunStartQpc = 0;
             m_QpcFrequency = 0;
-            status = ViosndConfigureDefaultPcm(m_Device, m_StreamId);
+            status = ConfigureNegotiatedPcm();
             if (NT_SUCCESS(status)) {
                 status = AllocateRenderIoPool();
             }
@@ -2152,7 +2232,7 @@ CViosndMiniportWaveRTStream::SetState(_In_ KSSTATE State)
             (VOID)ViosndStopPcm(m_Device, m_StreamId);
             (VOID)ViosndReleasePcm(m_Device, m_StreamId);
 
-            configureStatus = ViosndConfigureDefaultPcm(m_Device, m_StreamId);
+            configureStatus = ConfigureNegotiatedPcm();
             status = configureStatus;
             if (NT_SUCCESS(status)) {
                 startStatus = ViosndStartPcm(m_Device, m_StreamId);
@@ -2503,10 +2583,11 @@ CViosndMiniportWaveRTStream::AllocateAudioBuffer(
 
     ULONG allocatedSize = MmGetMdlByteCount(m_Mdl);
     RtlZeroMemory(m_Buffer, allocatedSize);
-    m_BufferSize = ViosndUsableBufferSizeFromAllocatedSize(allocatedSize);
-    m_NotificationCount = ViosndNotificationCountFromBufferSize(m_BufferSize);
+    m_BufferSize = ViosndUsableBufferSizeFromAllocatedSize(allocatedSize, m_PeriodBytes);
+    m_NotificationCount = ViosndNotificationCountFromBufferSize(m_BufferSize, m_PeriodBytes);
     m_PacketSize = ViosndPacketSizeFromNotificationCount(m_BufferSize,
-                                                         m_NotificationCount);
+                                                         m_NotificationCount,
+                                                         m_PeriodBytes);
     *AudioBufferMdl = m_Mdl;
     *ActualSize = m_BufferSize;
     *OffsetFromFirstPage = 0;
@@ -2606,7 +2687,7 @@ CViosndMiniportWaveRTStream::AllocateBufferWithNotification(
                                                           (VIOSND_DEFAULT_BUFFER_BYTES /
                                                            VIOSND_DEFAULT_PERIOD_BYTES);
     requestedNotificationCount = max(requestedNotificationCount, 1u);
-    periodAlignedSize = (ULONGLONG)requestedNotificationCount * VIOSND_DEFAULT_PERIOD_BYTES;
+    periodAlignedSize = (ULONGLONG)requestedNotificationCount * m_PeriodBytes;
     if (periodAlignedSize > MAXULONG) {
         return STATUS_INVALID_BUFFER_SIZE;
     }
@@ -2618,9 +2699,10 @@ CViosndMiniportWaveRTStream::AllocateBufferWithNotification(
                                           OffsetFromFirstPage,
                                           CacheType);
     if (NT_SUCCESS(status)) {
-        m_NotificationCount = ViosndNotificationCountFromBufferSize(m_BufferSize);
+        m_NotificationCount = ViosndNotificationCountFromBufferSize(m_BufferSize, m_PeriodBytes);
         m_PacketSize = ViosndPacketSizeFromNotificationCount(m_BufferSize,
-                                                             m_NotificationCount);
+                                                             m_NotificationCount,
+                                                             m_PeriodBytes);
         VIOSND_LOG(DPFLTR_IHVDRIVER_ID,
                    DPFLTR_ERROR_LEVEL,
                    "viosnd: stream %u %s AllocateBufferWithNotification requested=%u allocatedRequest=%u actual=%u packet=%u notif=%u requestedNotif=%u fixedPeriod=%u\n",
@@ -2773,14 +2855,84 @@ CViosndMiniportWaveRTStream::GetPacketCount(_Out_ ULONG *PacketCount)
 
 CViosndMiniportWaveRT::CViosndMiniportWaveRT(
     _In_ PVIOSND_DEVICE Device,
-    _In_ ULONG StreamId,
-    _In_ BOOLEAN Capture) :
+    _In_ const VIOSND_ENDPOINT *Endpoint) :
     m_RefCount(1),
     m_Device(Device),
-    m_StreamId(StreamId),
-    m_Capture(Capture),
-    m_Port(NULL)
+    m_StreamId(Endpoint->StreamId),
+    m_Capture(Endpoint->Capture),
+    m_Port(NULL),
+    m_RangePointers(NULL),
+    m_RangeCount(0)
 {
+    m_Endpoint = *Endpoint;
+    RtlZeroMemory(m_Pins, sizeof(m_Pins));
+    RtlZeroMemory(&m_Filter, sizeof(m_Filter));
+}
+
+NTSTATUS
+CViosndMiniportWaveRT::BuildDescription()
+{
+    const PCFILTER_DESCRIPTOR *tmpl = m_Capture ? &ViosndCaptureFilterDescriptor
+                                                : &ViosndRenderFilterDescriptor;
+    NTSTATUS status;
+
+    /* virtio-snd allows a channel count far past anything Windows will route here, and the
+     * advertised maximum is what the engine believes it may ask for. Cap it before it is
+     * published rather than refusing the request afterwards. */
+    if (m_Endpoint.Caps.ChannelsMax > VIOSND_MAX_CHANNELS) {
+        m_Endpoint.Caps.ChannelsMax = (UCHAR)VIOSND_MAX_CHANNELS;
+    }
+    if (m_Endpoint.Caps.ChannelsMin > m_Endpoint.Caps.ChannelsMax) {
+        return STATUS_DEVICE_CONFIGURATION_ERROR;
+    }
+    if (m_Endpoint.Preferred.Channels > m_Endpoint.Caps.ChannelsMax) {
+        m_Endpoint.Preferred.Channels = m_Endpoint.Caps.ChannelsMax;
+    }
+
+    status = ViosndBuildDataRanges(&m_Endpoint.Caps,
+                                   &m_Endpoint.Preferred,
+                                   &m_RangePointers,
+                                   &m_RangeCount);
+    if (!NT_SUCCESS(status)) {
+        /* The endpoint offered nothing Windows can express. Say so rather than falling back to
+         * a format the host never claimed to accept. */
+        ViosndRecordDiag(m_Device,
+                         m_Capture ? L"CaptureRanges" : L"RenderRanges",
+                         L"no expressible format");
+        return status;
+    }
+
+    RtlCopyMemory(m_Pins, tmpl->Pins, sizeof(m_Pins));
+    m_Pins[VIOSND_PIN_SYSTEM].KsPinDescriptor.DataRanges = m_RangePointers;
+    m_Pins[VIOSND_PIN_SYSTEM].KsPinDescriptor.DataRangesCount = m_RangeCount;
+
+    m_Filter = *tmpl;
+    m_Filter.Pins = m_Pins;
+    m_Filter.PinCount = SIZEOF_ARRAY(m_Pins);
+
+    {
+        WCHAR text[224];
+
+        if (NT_SUCCESS(RtlStringCchPrintfW(text,
+                                           SIZEOF_ARRAY(text),
+                                           L"stream=%u nid=%u kind=%u ranges=%u "
+                                           L"preferred=%uHz/%uch/%ubit%s%s",
+                                           m_Endpoint.StreamId,
+                                           m_Endpoint.DeviceIndex,
+                                           m_Endpoint.Kind,
+                                           m_RangeCount,
+                                           m_Endpoint.Preferred.SampleRate,
+                                           m_Endpoint.Preferred.Channels,
+                                           m_Endpoint.Preferred.ContainerBits,
+                                           m_Endpoint.Preferred.Float ? L" float" : L"",
+                                           m_Endpoint.PreferredFromHost ? L" (host)"
+                                                                        : L" (driver)"))) {
+            ViosndRecordDiag(m_Device,
+                             m_Capture ? L"CaptureRanges" : L"RenderRanges",
+                             text);
+        }
+    }
+    return STATUS_SUCCESS;
 }
 
 STDMETHODIMP_(NTSTATUS)
@@ -2816,6 +2968,12 @@ CViosndMiniportWaveRT::Release()
 {
     LONG count = InterlockedDecrement(&m_RefCount);
     if (count == 0) {
+        /* Freed here rather than from a destructor: declaring one makes the compiler emit a
+         * deleting destructor, and that references an operator delete a kernel driver has no
+         * reason to carry. The stream class next door is built the same way. */
+        ViosndFreeDataRanges(m_RangePointers);
+        m_RangePointers = NULL;
+        m_RangeCount = 0;
         this->~CViosndMiniportWaveRT();
         ExFreePoolWithTag(this, VIOSND_POOL_TAG);
     }
@@ -2825,7 +2983,7 @@ CViosndMiniportWaveRT::Release()
 STDMETHODIMP_(NTSTATUS)
 CViosndMiniportWaveRT::GetDescription(_Out_ PPCFILTER_DESCRIPTOR *Description)
 {
-    *Description = m_Capture ? &ViosndCaptureFilterDescriptor : &ViosndRenderFilterDescriptor;
+    *Description = &m_Filter;
     return STATUS_SUCCESS;
 }
 
@@ -2838,9 +2996,17 @@ CViosndMiniportWaveRT::DataRangeIntersection(
     _Out_writes_bytes_to_opt_(OutputBufferLength, *ResultantFormatLength) PVOID ResultantFormat,
     _Out_ PULONG ResultantFormatLength)
 {
-    UNREFERENCED_PARAMETER(PinId);
-    UNREFERENCED_PARAMETER(DataRange);
-    UNREFERENCED_PARAMETER(MatchingDataRange);
+    const KSDATARANGE_AUDIO *ours;
+    const KSDATARANGE_AUDIO *theirs;
+    VIOSND_WAVE_FORMAT wave;
+    WAVEFORMATEXTENSIBLE wfx;
+    ULONG channels;
+
+    /* Only the streaming pin carries a format; the bridge pin is analog and has no intersection
+     * to compute. */
+    if (PinId != VIOSND_PIN_SYSTEM) {
+        return STATUS_NO_MATCH;
+    }
 
     *ResultantFormatLength = sizeof(KSDATAFORMAT_WAVEFORMATEXTENSIBLE);
     if (OutputBufferLength == 0) {
@@ -2850,7 +3016,56 @@ CViosndMiniportWaveRT::DataRangeIntersection(
         return STATUS_BUFFER_TOO_SMALL;
     }
 
-    ViosndBuildDefaultFormat((PKSDATAFORMAT_WAVEFORMATEXTENSIBLE)ResultantFormat);
+    if (MatchingDataRange == NULL ||
+        MatchingDataRange->FormatSize < sizeof(KSDATARANGE_AUDIO) ||
+        DataRange == NULL ||
+        !IsEqualGUIDAligned(DataRange->MajorFormat, KSDATAFORMAT_TYPE_AUDIO) ||
+        !IsEqualGUIDAligned(DataRange->Specifier, KSDATAFORMAT_SPECIFIER_WAVEFORMATEX)) {
+        return STATUS_NO_MATCH;
+    }
+
+    /* Our own ranges are single points -- one rate, one width each -- so the intersection is
+     * that point, provided the caller's range admits it. Channels are the one axis with room to
+     * negotiate, and there the narrower of the two wins. */
+    ours = (const KSDATARANGE_AUDIO *)MatchingDataRange;
+    channels = ours->MaximumChannels;
+
+    if (DataRange->FormatSize >= sizeof(KSDATARANGE_AUDIO)) {
+        theirs = (const KSDATARANGE_AUDIO *)DataRange;
+        if (ours->MinimumSampleFrequency < theirs->MinimumSampleFrequency ||
+            ours->MinimumSampleFrequency > theirs->MaximumSampleFrequency ||
+            ours->MinimumBitsPerSample < theirs->MinimumBitsPerSample ||
+            ours->MinimumBitsPerSample > theirs->MaximumBitsPerSample) {
+            return STATUS_NO_MATCH;
+        }
+        if (theirs->MaximumChannels != 0 && theirs->MaximumChannels < channels) {
+            channels = theirs->MaximumChannels;
+        }
+    }
+
+    if (channels == 0 || channels > VIOSND_MAX_CHANNELS) {
+        return STATUS_NO_MATCH;
+    }
+
+    /* Round-trip it through the stream's own capabilities rather than trusting the arithmetic:
+     * whatever comes back is a format the device has said it will accept. */
+    RtlZeroMemory(&wfx, sizeof(wfx));
+    wfx.Format.wFormatTag = WAVE_FORMAT_EXTENSIBLE;
+    wfx.Format.nChannels = (WORD)channels;
+    wfx.Format.nSamplesPerSec = ours->MinimumSampleFrequency;
+    wfx.Format.wBitsPerSample = (WORD)ours->MinimumBitsPerSample;
+    wfx.Format.nBlockAlign = (WORD)((channels * ours->MinimumBitsPerSample) / 8);
+    wfx.Format.nAvgBytesPerSec = wfx.Format.nSamplesPerSec * wfx.Format.nBlockAlign;
+    wfx.Format.cbSize = sizeof(WAVEFORMATEXTENSIBLE) - sizeof(WAVEFORMATEX);
+    wfx.Samples.wValidBitsPerSample = wfx.Format.wBitsPerSample;
+    wfx.dwChannelMask = ViosndChannelMask((UCHAR)channels);
+    wfx.SubFormat = ours->DataRange.SubFormat;
+
+    if (!ViosndFormatFromWave(&wfx.Format, &m_Endpoint.Caps, &wave)) {
+        return STATUS_NO_MATCH;
+    }
+
+    ViosndBuildWaveFormat(&wave, (PKSDATAFORMAT_WAVEFORMATEXTENSIBLE)ResultantFormat);
     return STATUS_SUCCESS;
 }
 
@@ -2881,10 +3096,12 @@ CViosndMiniportWaveRT::NewStream(
      * the refusal into an endpoint that opens and returns silence. Record which one it was, and
      * what was asked for, before returning.
      */
+    VIOSND_WAVE_FORMAT wave;
+    BOOLEAN formatOk = ViosndResolveDataFormat(DataFormat, &m_Endpoint.Caps, &wave);
+
     {
         WCHAR text[224];
         PWAVEFORMATEX wfx = NULL;
-        BOOLEAN formatOk = ViosndIsDefaultFormat(DataFormat);
 
         if (DataFormat != NULL &&
             DataFormat->FormatSize >= sizeof(KSDATAFORMAT_WAVEFORMATEX) &&
@@ -2917,7 +3134,7 @@ CViosndMiniportWaveRT::NewStream(
     if (Stream == NULL ||
         Pin != VIOSND_PIN_SYSTEM ||
         Capture != m_Capture ||
-        !ViosndIsDefaultFormat(DataFormat)) {
+        !formatOk) {
         return STATUS_INVALID_PARAMETER;
     }
 
@@ -2928,7 +3145,11 @@ CViosndMiniportWaveRT::NewStream(
         return STATUS_INSUFFICIENT_RESOURCES;
     }
 
-    *Stream = new(memory) CViosndMiniportWaveRTStream(this, m_Device, m_StreamId, m_Capture);
+    *Stream = new(memory) CViosndMiniportWaveRTStream(this,
+                                                      m_Device,
+                                                      m_StreamId,
+                                                      m_Capture,
+                                                      &wave);
     return STATUS_SUCCESS;
 }
 
@@ -2950,11 +3171,12 @@ CViosndMiniportWaveRT::GetDeviceDescription(_Out_ PDEVICE_DESCRIPTION DeviceDesc
 NTSTATUS
 ViosndCreateWaveRTMiniport(
     _In_ PVIOSND_DEVICE Device,
-    _In_ ULONG StreamId,
-    _In_ BOOLEAN Capture,
+    _In_ const VIOSND_ENDPOINT *Endpoint,
     _Outptr_ PMINIPORT *Miniport)
 {
     PVOID memory;
+    CViosndMiniportWaveRT *miniport;
+    NTSTATUS status;
 
     *Miniport = NULL;
     memory = ExAllocatePoolUninitialized(NonPagedPoolNx,
@@ -2964,7 +3186,14 @@ ViosndCreateWaveRTMiniport(
         return STATUS_INSUFFICIENT_RESOURCES;
     }
 
-    *Miniport = new(memory) CViosndMiniportWaveRT(Device, StreamId, Capture);
+    miniport = new(memory) CViosndMiniportWaveRT(Device, Endpoint);
+    status = miniport->BuildDescription();
+    if (!NT_SUCCESS(status)) {
+        miniport->Release();
+        return status;
+    }
+
+    *Miniport = miniport;
     return STATUS_SUCCESS;
 }
 

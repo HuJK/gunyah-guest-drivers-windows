@@ -28,6 +28,8 @@ ViosndGetDefaultPcmFormat(
     Format->BitsPerSample = VIOSND_DEFAULT_BITS_PER_SAMPLE;
     Format->BufferBytes = VIOSND_DEFAULT_BUFFER_BYTES;
     Format->PeriodBytes = VIOSND_DEFAULT_PERIOD_BYTES;
+    Format->VirtioFormat = VIRTIO_SND_PCM_FMT_S16;
+    Format->VirtioRate = ViosndPcmRateFromSampleRate(VIOSND_DEFAULT_SAMPLE_RATE);
 }
 
 VOID
@@ -36,6 +38,7 @@ ViosndGetFallbackPcmFormat(
 {
     ViosndGetDefaultPcmFormat(Format);
     Format->SampleRate = VIOSND_FALLBACK_SAMPLE_RATE;
+    Format->VirtioRate = ViosndPcmRateFromSampleRate(VIOSND_FALLBACK_SAMPLE_RATE);
     Format->PeriodBytes = VIOSND_FALLBACK_PERIOD_BYTES;
     Format->BufferBytes = VIOSND_FALLBACK_PERIOD_BYTES * 16u;
 }
@@ -73,8 +76,39 @@ ViosndBuildSetParams(
     Params->period_bytes = Format->PeriodBytes;
     Params->features = 0;
     Params->channels = Format->Channels;
-    Params->format = VIRTIO_SND_PCM_FMT_S16;
-    Params->rate = ViosndPcmRateFromSampleRate(Format->SampleRate);
+    Params->format = Format->VirtioFormat;
+    Params->rate = Format->VirtioRate;
+}
+
+VOID
+ViosndPcmFormatFromWave(
+    _In_ const VIOSND_WAVE_FORMAT *Wave,
+    _In_ ULONG PeriodBytes,
+    _In_ ULONG NotificationCount,
+    _Out_ PVIOSND_PCM_FORMAT Format)
+{
+    ULONG frameBytes = ViosndFrameBytes(Wave);
+
+    RtlZeroMemory(Format, sizeof(*Format));
+    Format->SampleRate = Wave->SampleRate;
+    Format->Channels = Wave->Channels;
+    Format->BitsPerSample = Wave->ContainerBits;
+    Format->VirtioFormat = Wave->VirtioFormat;
+    Format->VirtioRate = Wave->VirtioRate;
+
+    /* A period that is not whole frames desynchronises every position the driver reports, so
+     * round down and let the buffer follow from what the period actually became. */
+    if (frameBytes == 0) {
+        frameBytes = 1;
+    }
+    if (PeriodBytes < frameBytes) {
+        PeriodBytes = frameBytes;
+    }
+    Format->PeriodBytes = (PeriodBytes / frameBytes) * frameBytes;
+    if (NotificationCount == 0) {
+        NotificationCount = 1;
+    }
+    Format->BufferBytes = Format->PeriodBytes * NotificationCount;
 }
 
 NTSTATUS
