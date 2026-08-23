@@ -8,6 +8,8 @@ extern "C" {
 
 #include <wdmguid.h>
 
+#include "ViosndRdma.h"
+
 #define VIOSND_MAX_BARS PCI_TYPE0_ADDRESSES
 #define VIOSND_CONTROL_TIMEOUT_MS 5000u
 #define VIOSND_CONTROL_POLL_DELAY_US 1000u
@@ -36,6 +38,9 @@ typedef struct _VIOSND_DMA_BLOCK {
     PVOID Va;
     PHYSICAL_ADDRESS LogicalAddress;
     SIZE_T Size;
+    /* TRUE when the block came from the restricted DMA pool rather than from
+     * the HAL common-buffer allocator, which decides how it is released. */
+    BOOLEAN FromPool;
     SINGLE_LIST_ENTRY Entry;
 } VIOSND_DMA_BLOCK, *PVIOSND_DMA_BLOCK;
 
@@ -54,6 +59,9 @@ struct _VIOSND_DEVICE {
     SINGLE_LIST_ENTRY DmaBlocks;
     PDMA_ADAPTER DmaAdapter;
     ULONG DmaMapRegisters;
+    /* Restricted DMA pool. Inactive on QEMU/KVM and on a pseudo-unprotected
+     * Gunyah VM, where the ordinary common-buffer path is device-visible. */
+    VIOSND_RDMA Rdma;
     VirtIODevice Vdev;
     BOOLEAN VirtioInitialized;
     struct virtqueue *Queues[VIRTIO_SND_VQ_MAX];
@@ -178,8 +186,16 @@ ViosndAllocateDmaBuffer(
     PVIOSND_DMA_BLOCK block;
     SIZE_T roundedSize = ROUND_TO_PAGES(Size);
 
+    BOOLEAN fromPool = ViosndRdmaActive(&Device->Rdma);
+
     LogicalAddress->QuadPart = 0;
-    if (Device->DmaAdapter == NULL || roundedSize > MAXULONG) {
+    if (roundedSize > MAXULONG) {
+        return NULL;
+    }
+    /* Without the pool this is the HAL common-buffer path, which needs the
+     * adapter; with it, the adapter is irrelevant -- the pool region is already
+     * mapped and its physical addresses are known. */
+    if (!fromPool && Device->DmaAdapter == NULL) {
         return NULL;
     }
 
@@ -190,11 +206,18 @@ ViosndAllocateDmaBuffer(
         return NULL;
     }
     RtlZeroMemory(block, sizeof(*block));
+    block->FromPool = fromPool;
 
-    block->Va = Device->DmaAdapter->DmaOperations->AllocateCommonBuffer(Device->DmaAdapter,
-                                                                        (ULONG)roundedSize,
-                                                                        &block->LogicalAddress,
-                                                                        FALSE);
+    if (fromPool) {
+        /* In a protected VM this is the only memory crosvm can read: vrings,
+         * control messages and staged PCM periods all have to land here. */
+        block->Va = ViosndRdmaAlloc(&Device->Rdma, roundedSize, &block->LogicalAddress);
+    } else {
+        block->Va = Device->DmaAdapter->DmaOperations->AllocateCommonBuffer(Device->DmaAdapter,
+                                                                            (ULONG)roundedSize,
+                                                                            &block->LogicalAddress,
+                                                                            FALSE);
+    }
     if (block->Va == NULL) {
         ExFreePoolWithTag(block, VIOSND_POOL_TAG);
         return NULL;
@@ -226,7 +249,9 @@ ViosndFreeDmaBuffer(
         PVIOSND_DMA_BLOCK block = CONTAINING_RECORD(current, VIOSND_DMA_BLOCK, Entry);
         if (block->Va == Virt) {
             previous->Next = current->Next;
-            if (Device->DmaAdapter != NULL) {
+            if (block->FromPool) {
+                ViosndRdmaFree(&Device->Rdma, block->Va, block->Size);
+            } else if (Device->DmaAdapter != NULL) {
                 Device->DmaAdapter->DmaOperations->FreeCommonBuffer(Device->DmaAdapter,
                                                                     (ULONG)block->Size,
                                                                     block->LogicalAddress,
@@ -741,7 +766,14 @@ ViosndInitVirtio(
                DPFLTR_ERROR_LEVEL,
                "viosnd: host features=0x%llx\n",
                features);
-    features &= (1ULL << VIRTIO_F_VERSION_1);
+    /* VIRTIO_F_ACCESS_PLATFORM is what crosvm offers on every protected VM
+     * (base_features() sets it for any protection type). Every other driver in
+     * this fork acknowledges it when offered -- VirtIOWdf.c for the WDF ones,
+     * virtio_stor.c for StorPort -- and the addresses viosnd hands over are
+     * restricted-DMA-pool physical addresses, which is exactly what the device
+     * can reach. Leaving it un-acked would be a needless deviation from the
+     * drivers known to work here. */
+    features &= (1ULL << VIRTIO_F_VERSION_1) | (1ULL << VIRTIO_F_ACCESS_PLATFORM);
     VIOSND_LOG(DPFLTR_IHVDRIVER_ID,
                DPFLTR_ERROR_LEVEL,
                "viosnd: driver features=0x%llx\n",
@@ -1281,6 +1313,21 @@ ViosndCreateDevice(
         return status;
     }
 
+    /* Protected-VM staging. Has to happen before any device-visible buffer is
+     * allocated -- virtio_find_queues() builds the vrings through
+     * ViosndAllocContiguous. Soft-fail on purpose: STATUS_NOT_FOUND just means
+     * this is not a protected VM (QEMU/KVM, or Gunyah pseudo-unprotected),
+     * where the common-buffer path is already device-visible. */
+    status = ViosndRdmaConnect(&device->Rdma,
+                               VIOSND_RDMA_RING_PAGES,
+                               VIOSND_RDMA_DATA_PAGES);
+    if (!NT_SUCCESS(status)) {
+        VIOSND_LOG(DPFLTR_IHVDRIVER_ID,
+                   DPFLTR_ERROR_LEVEL,
+                   "viosnd: rdmapool unavailable (0x%08x), using normal DMA\n",
+                   status);
+    }
+
     status = ViosndMapBars(device, ResourceList);
     if (!NT_SUCCESS(status)) {
         ViosndDestroyDevice(device);
@@ -1319,7 +1366,9 @@ ViosndDestroyDevice(
     while (Device->DmaBlocks.Next != NULL) {
         PSINGLE_LIST_ENTRY entry = PopEntryList(&Device->DmaBlocks);
         PVIOSND_DMA_BLOCK block = CONTAINING_RECORD(entry, VIOSND_DMA_BLOCK, Entry);
-        if (Device->DmaAdapter != NULL) {
+        if (block->FromPool) {
+            ViosndRdmaFree(&Device->Rdma, block->Va, block->Size);
+        } else if (Device->DmaAdapter != NULL) {
             Device->DmaAdapter->DmaOperations->FreeCommonBuffer(Device->DmaAdapter,
                                                                 (ULONG)block->Size,
                                                                 block->LogicalAddress,
@@ -1328,6 +1377,9 @@ ViosndDestroyDevice(
         }
         ExFreePoolWithTag(block, VIOSND_POOL_TAG);
     }
+
+    /* After the blocks: the region has to outlive everything carved out of it. */
+    ViosndRdmaDisconnect(&Device->Rdma);
 
     if (Device->DmaAdapter != NULL) {
         Device->DmaAdapter->DmaOperations->PutDmaAdapter(Device->DmaAdapter);

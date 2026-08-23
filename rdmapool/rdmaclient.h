@@ -78,6 +78,10 @@ typedef struct _RDMA_CLIENT
     PVOID CbContext;
 } RDMA_CLIENT, *PRDMA_CLIENT;
 
+/* Data-area cap used by RdmaClientConnect: 8192 pages = 32MB, sized for the
+ * storage miniports' bounce traffic. */
+#define RDMA_CLIENT_DEFAULT_DATA_PAGES 8192u
+
 /*
  * Connect to the rdmapool driver and allocate one contiguous region of
  * RingPages (the caller's vrings) + MetaPages (control slots / event area)
@@ -88,6 +92,18 @@ typedef struct _RDMA_CLIENT
  * absent, so the caller keeps the normal (KVM/QEMU) DMA path.
  */
 NTSTATUS RdmaClientConnect(PRDMA_CLIENT c, const char *Tag, ULONG RingPages, ULONG MetaPages);
+
+/*
+ * As RdmaClientConnect, but with an explicit cap on the data area instead of
+ * the storage-sized default. A driver whose device-visible working set is
+ * small -- viosnd stages a handful of period buffers, not a disk queue -- must
+ * not reserve a 32MB slice of a pool every other pVM driver shares.
+ */
+NTSTATUS RdmaClientConnectEx(PRDMA_CLIENT c,
+                             const char *Tag,
+                             ULONG RingPages,
+                             ULONG MetaPages,
+                             ULONG MaxDataPages);
 VOID RdmaClientDisconnect(PRDMA_CLIENT c);
 
 /* VA<->PA within the contiguous rdmapool region. */

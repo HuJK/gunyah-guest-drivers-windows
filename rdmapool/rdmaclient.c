@@ -68,6 +68,15 @@ static NTSTATUS RdmaClientIoctl(PRDMA_CLIENT c,
 
 NTSTATUS RdmaClientConnect(PRDMA_CLIENT c, const char *Tag, ULONG RingPages, ULONG MetaPages)
 {
+    return RdmaClientConnectEx(c, Tag, RingPages, MetaPages, RDMA_CLIENT_DEFAULT_DATA_PAGES);
+}
+
+NTSTATUS RdmaClientConnectEx(PRDMA_CLIENT c,
+                             const char *Tag,
+                             ULONG RingPages,
+                             ULONG MetaPages,
+                             ULONG MaxDataPages)
+{
     NTSTATUS status;
     PWSTR deviceInterfaceList = NULL;
     UNICODE_STRING deviceName;
@@ -115,9 +124,9 @@ NTSTATUS RdmaClientConnect(PRDMA_CLIENT c, const char *Tag, ULONG RingPages, ULO
     poolPages = (ULONG)(queryOutput.TotalSize / PAGE_SIZE);
 
     /* Region = vrings + caller metadata (control slots / event area) + a data
-     * area capped at 32MB / half the pool (the pool is shared with the other
-     * pVM drivers). */
-    bouncePages = MetaPages + min(8192u, poolPages / 2);
+     * area capped at MaxDataPages / half the pool (the pool is shared with the
+     * other pVM drivers). */
+    bouncePages = MetaPages + min(MaxDataPages, poolPages / 2);
     totalPages = RingPages + bouncePages;
     if (totalPages > poolPages)
     {
