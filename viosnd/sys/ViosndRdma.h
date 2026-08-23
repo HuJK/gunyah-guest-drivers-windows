@@ -13,14 +13,14 @@
  * from it into a DMA buffer before the descriptor is added. So the whole port
  * is: point that one allocator at the pool.
  *
- * Sub-allocation is page-granular over the single contiguous region rdmapool
- * hands back. Unlike the storage miniports (fixed control slots + fixed data
+ * Sub-allocation is page-granular, over however many regions the driver has
+ * taken. Unlike the storage miniports (fixed control slots + fixed data
  * chunks, sized by queue depth) viosnd asks for a handful of variable-sized
  * blocks -- vrings at device init, then one IO pool per stream at stream start
- * -- so a bitmap over the region fits better than a SLIST of fixed slots.
+ * -- so a bitmap fits better than a SLIST of fixed slots.
  *
- * Absent pool = absent device interface: RdmaClientConnectEx returns
- * STATUS_NOT_FOUND, Active stays FALSE, and the driver keeps the ordinary
+ * Absent pool = absent device interface: RdmaClientOpen returns
+ * STATUS_NOT_FOUND, the pool stays closed, and the driver keeps the ordinary
  * AllocateCommonBuffer path. That is what runs on QEMU/KVM and on a
  * pseudo-unprotected Gunyah VM, where guest RAM is shared with the host and
  * there is nothing to stage through.
@@ -116,3 +116,5 @@ VOID ViosndRdmaFree(_Inout_ PVIOSND_RDMA Rdma, _In_opt_ PVOID Va, _In_ SIZE_T Si
 
 /* Pages currently held across all regions, for diagnostics. */
 ULONG ViosndRdmaHeldPages(_In_ PVIOSND_RDMA Rdma);
+
+#endif /* _VIOSNDRDMA_H_ */
