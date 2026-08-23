@@ -40,7 +40,7 @@ NTSTATUS VirtFsRdmaConnect(PDEVICE_CONTEXT Context)
         /* STATUS_NOT_FOUND simply means no ACPI\RDMA0000: an unprotected VM,
          * or QEMU/KVM. Not an error -- the normal DMA path is correct there. */
         TraceEvents(TRACE_LEVEL_INFORMATION,
-                    DBG_PNP,
+                    DBG_POWER,
                     "rdmapool not in use (%!STATUS!); payloads take the normal DMA path",
                     status);
         return status;
@@ -54,13 +54,13 @@ NTSTATUS VirtFsRdmaConnect(PDEVICE_CONTEXT Context)
                                   VIRTFS_BOUNCE_CHUNK_SIZE);
     if (!NT_SUCCESS(status))
     {
-        TraceEvents(TRACE_LEVEL_ERROR, DBG_PNP, "RdmaClientBounceInit failed %!STATUS!", status);
+        TraceEvents(TRACE_LEVEL_ERROR, DBG_POWER, "RdmaClientBounceInit failed %!STATUS!", status);
         RdmaClientDisconnect(c);
         return status;
     }
 
     TraceEvents(TRACE_LEVEL_INFORMATION,
-                DBG_PNP,
+                DBG_POWER,
                 "rdmapool active: %u ctl slots of %u, %u data chunks of %u",
                 c->CtlSlotCount,
                 c->CtlSlotSize,
