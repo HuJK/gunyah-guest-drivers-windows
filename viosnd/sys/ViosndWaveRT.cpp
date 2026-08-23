@@ -6,8 +6,18 @@ enum {
 
 #define VIOSND_RENDER_IO_POOL_SIZE 12u
 #define VIOSND_RENDER_TARGET_OUTSTANDING_PACKETS 8u
-#define VIOSND_RENDER_CYCLIC_OUTSTANDING_PACKETS 2u
-#define VIOSND_RENDER_FALLBACK_OUTSTANDING_PACKETS 2u
+/* How much audio the render pump keeps in flight. Two packets is ~21ms at the
+ * default 2048-byte period, and anything that keeps the pump off the CPU for
+ * longer than that is an underrun: crosvm finds the TX queue empty, writes a
+ * period of silence, and that gap is the click. On a Gunyah pVM the guest has no
+ * display driver at all -- DWM composites and video decodes in software -- so
+ * 21ms scheduling gaps are ordinary, and the clicks track content complexity
+ * rather than anything in the audio path (which carries raw PCM end to end).
+ * Six packets is ~64ms of slack, at the cost of ~40ms more latency, which the OS
+ * hides through the audio clock position. Still bounded by NotificationCount - 1:
+ * the pump must never send a packet the OS has not written yet. */
+#define VIOSND_RENDER_CYCLIC_OUTSTANDING_PACKETS 6u
+#define VIOSND_RENDER_FALLBACK_OUTSTANDING_PACKETS 6u
 #define VIOSND_RENDER_START_PREROLL_PACKETS 2u
 #define VIOSND_RENDER_CYCLIC_PREROLL_PACKETS VIOSND_RENDER_START_PREROLL_PACKETS
 #define VIOSND_CAPTURE_IO_POOL_SIZE 8u
