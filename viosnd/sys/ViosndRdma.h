@@ -38,80 +38,81 @@ extern "C"
 }
 
 /*
- * Vrings for the four virtio-snd queues (control, event, tx, rx). A 1024-entry
- * split ring is ~28KB (16KB of descriptors plus avail and used), so 16 pages
- * per queue covers the largest size a backend is likely to advertise -- and
- * VirtIOPCIModern halves the queue until the ring fits if it does not.
+ * Regions are taken from the pool as they are needed rather than reserved up
+ * front, for two reasons that turn out to be the same reason.
  *
- * Rings and payload come out of one bitmap over the whole region, so this and
- * VIOSND_RDMA_DATA_PAGES only decide how much pool is reserved in total.
+ * The size is not knowable in advance. Rings and control buffers can be
+ * computed exactly -- the advertised queue sizes and the stream count are both
+ * plain reads from the device before anything is allocated -- but a stream's
+ * staging is sized from the WaveRT buffer the OS asks for, which does not
+ * exist until the stream is opened. Reserving for it means reserving for the
+ * largest format the driver would ever offer, which is several times what any
+ * particular stream uses.
+ *
+ * And the pool hands out contiguous runs, so a single large request can be
+ * refused against free space that would satisfy several smaller ones. viostor
+ * takes half the pool outright and NetKVM grows into it a buffer at a time; by
+ * the time a second sound card starts there may be no run left of the size a
+ * one-region driver needs, while the pieces it actually wants all fit.
  */
-#define VIOSND_RDMA_RING_PAGES 64u
+#define VIOSND_RDMA_MAX_REGIONS 16u
 
 /*
- * Device-visible payload. Per stream viosnd stages VIOSND_RENDER_IO_POOL_SIZE
- * (12) plus VIOSND_CAPTURE_IO_POOL_SIZE (8) period buffers, each
- * sizeof(VIRTIO_SND_PCM_XFER) + one packet; a shared-mode WASAPI packet at
- * 48kHz stereo 16-bit is ~2KB and rarely exceeds 8KB, so a stream's own
- * staging costs well under 256KB.
- *
- * 4MB is what a card gets when the pool has room, and it is more than the
- * arithmetic above needs -- but the arithmetic only covers stream staging, and
- * the device also allocates control and event buffers before any stream
- * exists. Cutting this to 512KB on the strength of the stream figure alone
- * made every card fail at QueryPcmStreams with STATUS_INSUFFICIENT_RESOURCES:
- * the rings took 256KB of it and device init could not finish in the rest.
- *
- * So the size stays generous and the retry below is what handles a crowded
- * pool, rather than a smaller request that is wrong whenever there is room.
+ * The least a region is worth taking. A page-at-a-time driver would fragment
+ * the shared pool for everyone else, so requests are rounded up to this and the
+ * remainder is left for the next allocation from the same region.
  */
-#define VIOSND_RDMA_DATA_PAGES 1024u
+#define VIOSND_RDMA_REGION_GRAIN_PAGES 32u
 
-/*
- * The floor for the retry. Not a guess at what is comfortable: 128 pages is
- * measured to fail during device init, so the floor sits well above it. Below
- * this the driver refuses rather than reaching a size that cannot finish
- * starting -- a card that fails at init with a recorded reason is easier to
- * deal with than one that starts and does not work.
- */
-#define VIOSND_RDMA_MIN_DATA_PAGES 512u
+typedef struct _VIOSND_RDMA_REGION
+{
+    PVOID BaseVA;
+    PHYSICAL_ADDRESS BasePA;
+    ULONG Pages;
+    RTL_BITMAP Bitmap;
+    PULONG BitmapBuffer;
+} VIOSND_RDMA_REGION, *PVIOSND_RDMA_REGION;
 
 typedef struct _VIOSND_RDMA
 {
     RDMA_CLIENT Client;
-    /* Guards the bitmap. Allocation happens at PASSIVE_LEVEL (device init and
-     * stream start); the lock is still taken at DISPATCH so a future caller on
-     * the streaming path cannot corrupt the map. */
+    /* Guards the region table and every bitmap in it. Allocation happens at
+     * PASSIVE_LEVEL (device init and stream start); the lock is still taken at
+     * DISPATCH so a future caller on the streaming path cannot corrupt it. */
     KSPIN_LOCK Lock;
-    RTL_BITMAP Bitmap;
-    PULONG BitmapBuffer;
-    ULONG PageCount;
+    VIOSND_RDMA_REGION Regions[VIOSND_RDMA_MAX_REGIONS];
+    ULONG RegionCount;
+    BOOLEAN Opened;
 } VIOSND_RDMA, *PVIOSND_RDMA;
 
 /*
- * Connect and carve the region into pages. Returns STATUS_NOT_FOUND when
- * rdmapool is absent, which callers treat as "stay on normal DMA", not as a
- * failure to start.
+ * Open the pool. Returns STATUS_NOT_FOUND when rdmapool is absent, which
+ * callers treat as "stay on normal DMA" -- that is what an unprotected or
+ * pseudo-unprotected VM looks like. Any other failure means the pool is there
+ * and unusable, and normal DMA would not be host-readable.
+ *
+ * No memory is taken here; regions arrive with the first allocation.
  */
-NTSTATUS ViosndRdmaConnect(_Inout_ PVIOSND_RDMA Rdma, _In_ ULONG RingPages, _In_ ULONG DataPages);
+NTSTATUS ViosndRdmaOpen(_Inout_ PVIOSND_RDMA Rdma);
 
-VOID ViosndRdmaDisconnect(_Inout_ PVIOSND_RDMA Rdma);
+VOID ViosndRdmaClose(_Inout_ PVIOSND_RDMA Rdma);
 
-/* TRUE once the pool is connected and every DMA buffer must come from it. */
+/* TRUE once the pool is open and every DMA buffer must come from it. */
 __forceinline BOOLEAN ViosndRdmaActive(_In_ PVIOSND_RDMA Rdma)
 {
-    return Rdma->Client.Active && Rdma->BitmapBuffer != NULL;
+    return Rdma->Opened;
 }
 
 /*
- * Allocate Size bytes (rounded up to pages) from the pool and report the
- * physical address the device must be given. NULL when the region is full.
+ * Allocate Size bytes (rounded up to pages) and report the physical address the
+ * device must be given. Takes a new region from the pool when no existing one
+ * has a run long enough. NULL when the pool cannot provide it.
  */
 _Ret_maybenull_ PVOID ViosndRdmaAlloc(_Inout_ PVIOSND_RDMA Rdma,
                                       _In_ SIZE_T Size,
                                       _Out_ PPHYSICAL_ADDRESS LogicalAddress);
 
-/* Return a block. Size must be the size passed to ViosndRdmaAlloc. */
 VOID ViosndRdmaFree(_Inout_ PVIOSND_RDMA Rdma, _In_opt_ PVOID Va, _In_ SIZE_T Size);
 
-#endif /* _VIOSNDRDMA_H_ */
+/* Pages currently held across all regions, for diagnostics. */
+ULONG ViosndRdmaHeldPages(_In_ PVIOSND_RDMA Rdma);

@@ -1377,9 +1377,9 @@ ViosndCreateDevice(
      * ViosndAllocContiguous. Soft-fail on purpose: STATUS_NOT_FOUND just means
      * this is not a protected VM (QEMU/KVM, or Gunyah pseudo-unprotected),
      * where the common-buffer path is already device-visible. */
-    status = ViosndRdmaConnect(&device->Rdma,
-                               VIOSND_RDMA_RING_PAGES,
-                               VIOSND_RDMA_DATA_PAGES);
+    /* Opening takes no memory: regions arrive with the first allocation, sized to what is
+     * being allocated. So there is nothing to know here, and nothing to guess. */
+    status = ViosndRdmaOpen(&device->Rdma);
     if (NT_SUCCESS(status)) {
         ViosndRecordRdmaState(device, L"active", status);
     } else if (status == STATUS_NOT_FOUND) {
@@ -1462,7 +1462,7 @@ ViosndDestroyDevice(
     }
 
     /* After the blocks: the region has to outlive everything carved out of it. */
-    ViosndRdmaDisconnect(&Device->Rdma);
+    ViosndRdmaClose(&Device->Rdma);
 
     if (Device->DmaAdapter != NULL) {
         Device->DmaAdapter->DmaOperations->PutDmaAdapter(Device->DmaAdapter);
@@ -1689,12 +1689,12 @@ ViosndRecordRdmaState(
     }
     if (!NT_SUCCESS(RtlStringCchPrintfW(text,
                                         SIZEOF_ARRAY(text),
-                                        L"%s (0x%08x), got=%I64u bytes, "
-                                        L"asked=%u pages, pool=%I64u bytes",
+                                        L"%s (0x%08x), held=%u pages in %u region(s), "
+                                        L"pool=%I64u bytes",
                                         What,
                                         Status,
-                                        Device->Rdma.Client.Size,
-                                        Device->Rdma.Client.LastRequestedPages,
+                                        ViosndRdmaHeldPages(&Device->Rdma),
+                                        Device->Rdma.RegionCount,
                                         Device->Rdma.Client.LastPoolTotalSize))) {
         return;
     }

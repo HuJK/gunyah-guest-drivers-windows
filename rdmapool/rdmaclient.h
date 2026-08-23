@@ -107,6 +107,27 @@ NTSTATUS RdmaClientConnect(PRDMA_CLIENT c, const char *Tag, ULONG RingPages, ULO
 NTSTATUS RdmaClientConnectEx(PRDMA_CLIENT c, const char *Tag, ULONG RingPages, ULONG MetaPages, ULONG MaxDataPages);
 VOID RdmaClientDisconnect(PRDMA_CLIENT c);
 
+/*
+ * Piecewise use of the pool, for a driver that wants several small regions
+ * instead of one large one.
+ *
+ * The pool hands out contiguous runs of pages, so one large request can be
+ * refused while several smaller ones succeed against the same free space --
+ * and a driver that reserves its worst case up front holds pages it may never
+ * use, in a pool shared with everything else in the guest. Open once, then take
+ * a region when there is something to put in it.
+ *
+ * RdmaClientOpen does not set Active: that still means "this client holds a
+ * region", and with this interface the client may hold several or none.
+ */
+NTSTATUS RdmaClientOpen(PRDMA_CLIENT c, const char *Tag);
+NTSTATUS RdmaClientAllocRegion(PRDMA_CLIENT c,
+                               ULONG Pages,
+                               PVOID *Va,
+                               PPHYSICAL_ADDRESS Pa);
+VOID RdmaClientFreeRegion(PRDMA_CLIENT c, PVOID Va, ULONG Pages);
+VOID RdmaClientClose(PRDMA_CLIENT c);
+
 /* VA<->PA within the contiguous rdmapool region. */
 PHYSICAL_ADDRESS RdmaClientVAtoPA(PRDMA_CLIENT c, PVOID va);
 PVOID RdmaClientPAtoVA(PRDMA_CLIENT c, PHYSICAL_ADDRESS pa);
