@@ -1782,6 +1782,7 @@ CViosndMiniportWaveRTStream::CaptureWorkerLoop()
     ULONG lastCompletedPackets = 0;
     ULONG targetOutstanding;
     ULONG diagTicks = 0;
+    BOOLEAN skipRecorded = FALSE;
 
     interval.QuadPart = -(10LL * VIOSND_CAPTURE_POLL_INTERVAL_US);
 
@@ -1855,6 +1856,25 @@ CViosndMiniportWaveRTStream::CaptureWorkerLoop()
             m_Buffer == NULL ||
             m_PacketSize == 0 ||
             m_NotificationCount == 0) {
+            /* Say which of the four it is, once. Skipping the submit for any of these reasons
+             * is indistinguishable from the outside from a device that never records. */
+            if (!skipRecorded) {
+                WCHAR text[160];
+
+                skipRecorded = TRUE;
+                if (NT_SUCCESS(RtlStringCchPrintfW(text,
+                                                   SIZEOF_ARRAY(text),
+                                                   L"skipping: state=%u buffer=%p packet=%u "
+                                                   L"notif=%u loop=%u",
+                                                   m_State,
+                                                   m_Buffer,
+                                                   m_PacketSize,
+                                                   m_NotificationCount,
+                                                   diagTicks))) {
+                    ViosndRecordDiag(m_Device, L"CaptureWorker", text);
+                }
+            }
+            diagTicks++;
             continue;
         }
 
@@ -1900,6 +1920,28 @@ CViosndMiniportWaveRTStream::CaptureWorkerLoop()
                                                m_State))) {
                 ViosndRecordDiag(m_Device, L"CaptureWorker", text);
             }
+        }
+    }
+
+    /* The loop is gone; say why, and what it managed. Its absence used to be visible only as a
+     * host complaining that its buffers went nowhere. */
+    {
+        WCHAR text[224];
+
+        if (NT_SUCCESS(RtlStringCchPrintfW(text,
+                                           SIZEOF_ARRAY(text),
+                                           L"exit: state=%u loops=%u ok=%u fail=%u last=0x%08x "
+                                           L"inFlight=%u next=%u read=%u free=%u",
+                                           m_State,
+                                           diagTicks,
+                                           m_CaptureSubmitOk,
+                                           m_CaptureSubmitFail,
+                                           m_CaptureLastSubmitStatus,
+                                           m_CaptureInFlight,
+                                           m_NextSubmitPacket,
+                                           m_CaptureReadPackets,
+                                           m_CaptureIoFreeCount))) {
+            ViosndRecordDiag(m_Device, L"CaptureWorker", text);
         }
     }
 
