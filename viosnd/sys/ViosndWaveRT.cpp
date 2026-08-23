@@ -2713,6 +2713,44 @@ CViosndMiniportWaveRT::NewStream(
 {
     UNREFERENCED_PARAMETER(PortStream);
 
+    /*
+     * Four ways to refuse, one status for all of them, and the caller is the OS -- which turns
+     * the refusal into an endpoint that opens and returns silence. Record which one it was, and
+     * what was asked for, before returning.
+     */
+    {
+        WCHAR text[224];
+        PWAVEFORMATEX wfx = NULL;
+        BOOLEAN formatOk = ViosndIsDefaultFormat(DataFormat);
+
+        if (DataFormat != NULL &&
+            DataFormat->FormatSize >= sizeof(KSDATAFORMAT_WAVEFORMATEX) &&
+            IsEqualGUIDAligned(DataFormat->Specifier, KSDATAFORMAT_SPECIFIER_WAVEFORMATEX)) {
+            wfx = &((PKSDATAFORMAT_WAVEFORMATEX)DataFormat)->WaveFormatEx;
+        }
+        if (NT_SUCCESS(RtlStringCchPrintfW(text,
+                                           SIZEOF_ARRAY(text),
+                                           L"%s pin=%u(want %u) capture=%u(want %u) format=%u"
+                                           L" tag=%u ch=%u rate=%u bits=%u",
+                                           (Stream != NULL && Pin == VIOSND_PIN_SYSTEM &&
+                                            Capture == m_Capture && formatOk)
+                                               ? L"accepted:"
+                                               : L"refused:",
+                                           Pin,
+                                           VIOSND_PIN_SYSTEM,
+                                           Capture,
+                                           m_Capture,
+                                           formatOk,
+                                           wfx != NULL ? wfx->wFormatTag : 0,
+                                           wfx != NULL ? wfx->nChannels : 0,
+                                           wfx != NULL ? wfx->nSamplesPerSec : 0,
+                                           wfx != NULL ? wfx->wBitsPerSample : 0))) {
+            ViosndRecordDiag(m_Device,
+                             m_Capture ? L"CaptureNewStream" : L"RenderNewStream",
+                             text);
+        }
+    }
+
     if (Stream == NULL ||
         Pin != VIOSND_PIN_SYSTEM ||
         Capture != m_Capture ||
