@@ -41,7 +41,6 @@ Legend:
 * ✨ new driver added by this fork 
 * ✅ ported and vrified 
 * ⚠️ ported but not yet verified 
-* 🚧 code in tree, never built or run 
 * ❌ not ported
 
 | Driver | Status | Notes |
@@ -58,7 +57,7 @@ Legend:
 | Balloon | ⚠️ | VirtIO-WDF routing in place, untested on a pVM |
 | viomem | ⚠️ | VirtIO-WDF routing in place, untested on a pVM |
 | viofs | ⚠️ | VirtIO-WDF routing in place, data path unreviewed |
-| viosnd | 🚧 | **not from upstream virtio-win** -- virtio-win has no sound driver ([issue #929](https://github.com/virtio-win/kvm-guest-drivers-windows/issues/929) is still open). Imported from [317764920/viosnd](https://github.com/317764920/viosnd) (BSD-3, PortCls + WaveRT over the low-level VirtioLib, render + capture, based on mm313).<br>pVM staging added here: `ViosndRdma.{h,cpp}` + `RdmaClientConnectEx`. **Never compiled and never run** -- ARM64 build and crosvm interop both unverified |
+| viosnd | ⚠️ | **not from upstream virtio-win** -- virtio-win has no sound driver ([issue #929](https://github.com/virtio-win/kvm-guest-drivers-windows/issues/929) is still open). Imported from [317764920/viosnd](https://github.com/317764920/viosnd) (BSD-3, PortCls + WaveRT over the low-level VirtioLib, based on mm313).<br>pVM staging added here: `ViosndRdma.{h,cpp}` + `RdmaClientConnectEx`.<br>**Playback verified on a real pVM** (w11, `--protected-vm-without-firmware --swiotlb 64`): device starts with problem code 0, both endpoints enumerate, and the host sees an active AAudio track from crosvm (uid 0) at 48kHz stereo with 2 underruns in a whole session. The rdmapool staging works -- vrings, control queue and TX payload all go through the pool.<br>**Capture does not deliver data to the guest.** The host end is fine (crosvm holds an active AudioFlinger RECORD track as uid 0, no RECORD_AUDIO grant needed), but the guest never posts RX buffers: crosvm logs `[Card 0] Overrun. No new DescriptorChain while running` ~100/s for the whole capture, 15833 of them in one session, and a `waveIn` capture of 8s returns WHDR_DONE with 0 bytes and an all-zero buffer. Teardown is also out of spec -- `Invalid PCM state transition from VIRTIO_SND_R_PCM_START to VIRTIO_SND_R_PCM_RELEASE`, so RELEASE fails with `VIRTIO_SND_S_NOT_SUPP`. Both look like upstream viosnd bugs in the RX path (it was developed against QEMU), not pVM ones: TX uses the same allocator, vrings and pool |
 | viogpu | ❌ | not ported; need huge works(~~dxvk~~ -> ~~gfxstream~~ -> Turnip Driver -> AHardwareBuffer) |
 | pvpanic | ❌ | not ported |
 | fwcfg  | ❌ | not ported |
