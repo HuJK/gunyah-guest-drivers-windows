@@ -1674,6 +1674,18 @@ ViosndFetchPcmInfo(
  * the host's settings reach the driver" does not exist anywhere. It is exactly the question
  * that gets asked after the fact.
  */
+VOID
+ViosndRecordDiag(
+    _In_ PVIOSND_DEVICE Device,
+    _In_z_ PCWSTR ValueName,
+    _In_z_ PCWSTR Text)
+{
+    if (Device == NULL || Device->PhysicalDeviceObject == NULL) {
+        return;
+    }
+    ViosndWriteDeviceDiagString(Device->PhysicalDeviceObject, ValueName, Text);
+}
+
 /* Records what became of the restricted DMA pool, which decides whether anything this device
  * puts in memory is readable by the host at all. */
 static VOID

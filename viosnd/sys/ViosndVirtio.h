@@ -34,6 +34,18 @@ VOID
 ViosndKickTxQueue(
     _Inout_ PVIOSND_DEVICE Device);
 
+/*
+ * Records a line of driver state under the device's registry key. Everything else the driver
+ * has to say goes to DbgPrint, which needs a debugger attached to exist at all -- so on a
+ * machine that is merely running, the answer to "what did it decide" is unavailable. This is
+ * readable from anywhere, at any later time.
+ */
+VOID
+ViosndRecordDiag(
+    _In_ PVIOSND_DEVICE Device,
+    _In_z_ PCWSTR ValueName,
+    _In_z_ PCWSTR Text);
+
 /* Groups the device's PCM streams into the endpoints this driver will expose. */
 NTSTATUS
 ViosndEnumerateEndpoints(

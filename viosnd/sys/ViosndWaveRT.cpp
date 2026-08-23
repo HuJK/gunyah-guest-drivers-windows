@@ -21,6 +21,8 @@ enum {
 #define VIOSND_RENDER_START_PREROLL_PACKETS 2u
 #define VIOSND_RENDER_CYCLIC_PREROLL_PACKETS VIOSND_RENDER_START_PREROLL_PACKETS
 #define VIOSND_CAPTURE_IO_POOL_SIZE 8u
+/* Poll loops between capture diagnostic writes; roughly one second. */
+#define VIOSND_CAPTURE_DIAG_INTERVAL_LOOPS 100u
 #define VIOSND_CAPTURE_TARGET_OUTSTANDING_PACKETS 4u
 #define VIOSND_COMPLETION_STALL_LOG_LOOPS 50u
 #define VIOSND_RENDER_REKICK_STALL_LOOPS 5u
@@ -554,6 +556,9 @@ private:
     ULONG m_RenderPositionQueries;
     ULONG m_CapturePositionQueries;
     ULONG m_CaptureReadPackets;
+    ULONG m_CaptureSubmitOk;
+    ULONG m_CaptureSubmitFail;
+    NTSTATUS m_CaptureLastSubmitStatus;
     ULONG m_RenderFallbackPhase;
     PVIOSND_PCM_IO m_RenderIoPool[VIOSND_RENDER_IO_POOL_SIZE];
     ULONG m_RenderIoFreeCount;
@@ -649,6 +654,9 @@ CViosndMiniportWaveRTStream::CViosndMiniportWaveRTStream(
     m_RenderPositionQueries(0),
     m_CapturePositionQueries(0),
     m_CaptureReadPackets(0),
+    m_CaptureSubmitOk(0),
+    m_CaptureSubmitFail(0),
+    m_CaptureLastSubmitStatus(STATUS_SUCCESS),
     m_RenderFallbackPhase(0),
     m_RenderIoFreeCount(0),
     m_RenderFallbackBuffer(NULL),
@@ -1773,6 +1781,7 @@ CViosndMiniportWaveRTStream::CaptureWorkerLoop()
     LARGE_INTEGER interval;
     ULONG lastCompletedPackets = 0;
     ULONG targetOutstanding;
+    ULONG diagTicks = 0;
 
     interval.QuadPart = -(10LL * VIOSND_CAPTURE_POLL_INTERVAL_US);
 
@@ -1787,6 +1796,30 @@ CViosndMiniportWaveRTStream::CaptureWorkerLoop()
     targetOutstanding = min(VIOSND_CAPTURE_TARGET_OUTSTANDING_PACKETS,
                             min(m_NotificationCount, VIOSND_CAPTURE_IO_POOL_SIZE));
     targetOutstanding = max(targetOutstanding, 1u);
+
+    /*
+     * Every one of these can stop the loop below from ever submitting, and each does it by
+     * taking a branch that says nothing: SubmitCapturePacket returns
+     * STATUS_INVALID_DEVICE_REQUEST when the buffer geometry is unset, and the loop swallows
+     * STATUS_DEVICE_BUSY. From outside, all of that looks the same as a device that simply
+     * never records. Write down what it started with.
+     */
+    {
+        WCHAR text[160];
+
+        if (NT_SUCCESS(RtlStringCchPrintfW(text,
+                                           SIZEOF_ARRAY(text),
+                                           L"enter: notif=%u packet=%u buffer=%u pool=%u "
+                                           L"target=%u state=%u",
+                                           m_NotificationCount,
+                                           m_PacketSize,
+                                           m_BufferSize,
+                                           m_CaptureIoFreeCount,
+                                           targetOutstanding,
+                                           m_State))) {
+            ViosndRecordDiag(m_Device, L"CaptureWorker", text);
+        }
+    }
 
     while (m_State == KSSTATE_RUN) {
         NTSTATUS waitStatus;
@@ -1828,17 +1861,44 @@ CViosndMiniportWaveRTStream::CaptureWorkerLoop()
         while (m_State == KSSTATE_RUN && m_CaptureInFlight < targetOutstanding) {
             NTSTATUS status = SubmitCapturePacket();
 
-            if (!NT_SUCCESS(status)) {
-                if (status != STATUS_DEVICE_BUSY) {
-                    VIOSND_LOG(DPFLTR_IHVDRIVER_ID,
-                               DPFLTR_ERROR_LEVEL,
-                               "viosnd: stream %u capture submit failed 0x%08x next=%u inFlight=%u\n",
-                               m_StreamId,
-                               status,
-                               m_NextSubmitPacket,
-                               m_CaptureInFlight);
-                }
-                break;
+            if (NT_SUCCESS(status)) {
+                m_CaptureSubmitOk++;
+                continue;
+            }
+            m_CaptureSubmitFail++;
+            m_CaptureLastSubmitStatus = status;
+            if (status != STATUS_DEVICE_BUSY) {
+                VIOSND_LOG(DPFLTR_IHVDRIVER_ID,
+                           DPFLTR_ERROR_LEVEL,
+                           "viosnd: stream %u capture submit failed 0x%08x next=%u inFlight=%u\n",
+                           m_StreamId,
+                           status,
+                           m_NextSubmitPacket,
+                           m_CaptureInFlight);
+            }
+            break;
+        }
+
+        /* Once a second, say what the loop is actually doing. A capture path that submits
+         * nothing and one that submits and never completes look identical from the host, which
+         * only ever reports that its buffers went nowhere. */
+        if ((++diagTicks % VIOSND_CAPTURE_DIAG_INTERVAL_LOOPS) == 0) {
+            WCHAR text[192];
+
+            if (NT_SUCCESS(RtlStringCchPrintfW(text,
+                                               SIZEOF_ARRAY(text),
+                                               L"ok=%u fail=%u last=0x%08x inFlight=%u "
+                                               L"next=%u read=%u free=%u ready=%u state=%u",
+                                               m_CaptureSubmitOk,
+                                               m_CaptureSubmitFail,
+                                               m_CaptureLastSubmitStatus,
+                                               m_CaptureInFlight,
+                                               m_NextSubmitPacket,
+                                               m_CaptureReadPackets,
+                                               m_CaptureIoFreeCount,
+                                               m_OutstandingWrites,
+                                               m_State))) {
+                ViosndRecordDiag(m_Device, L"CaptureWorker", text);
             }
         }
     }
