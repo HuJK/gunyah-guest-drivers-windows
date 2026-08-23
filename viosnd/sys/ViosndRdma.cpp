@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: BSD-3-Clause
 #include "precomp.h"
+#include "ViosndRdma.h"
 
 #define VIOSND_RDMA_TAG 'aRSV'
 
