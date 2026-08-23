@@ -1930,17 +1930,21 @@ CViosndMiniportWaveRTStream::CaptureWorkerLoop()
 
         if (NT_SUCCESS(RtlStringCchPrintfW(text,
                                            SIZEOF_ARRAY(text),
-                                           L"exit: state=%u loops=%u ok=%u fail=%u last=0x%08x "
-                                           L"inFlight=%u next=%u read=%u free=%u",
+                                           L"exit: state=%u loops=%u ok=%u fail=%u "
+                                           L"inFlight=%u next=%u read=%u posq=%u pos=%llu "
+                                           L"done=%u ready=%u evt=%u",
                                            m_State,
                                            diagTicks,
                                            m_CaptureSubmitOk,
                                            m_CaptureSubmitFail,
-                                           m_CaptureLastSubmitStatus,
                                            m_CaptureInFlight,
                                            m_NextSubmitPacket,
                                            m_CaptureReadPackets,
-                                           m_CaptureIoFreeCount))) {
+                                           m_CapturePositionQueries,
+                                           m_Position,
+                                           m_PacketNumber,
+                                           m_OutstandingWrites,
+                                           m_NotificationEvent != NULL ? 1u : 0u))) {
             ViosndRecordDiag(m_Device, L"CaptureWorker", text);
         }
     }
