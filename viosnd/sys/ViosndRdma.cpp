@@ -27,7 +27,14 @@ NTSTATUS ViosndRdmaOpen(_Inout_ PVIOSND_RDMA Rdma)
     return STATUS_SUCCESS;
 }
 
-/* Takes one more region of at least Pages pages. Caller holds the lock. */
+/*
+ * Takes one more region of at least Pages pages and publishes it.
+ *
+ * Must run at PASSIVE_LEVEL and WITHOUT the lock held: reaching the pool means an IOCTL, and
+ * RdmaClientIoctl waits on an event for the completion. Doing that inside the spin lock -- which
+ * is what the first version of this did -- raises IRQL to DISPATCH and then blocks on it, so
+ * device start simply stopped, with the device reported as started and nothing else to see.
+ */
 static PVIOSND_RDMA_REGION ViosndRdmaAddRegion(_Inout_ PVIOSND_RDMA Rdma, _In_ ULONG Pages)
 {
     PVIOSND_RDMA_REGION region;
@@ -38,6 +45,14 @@ static PVIOSND_RDMA_REGION ViosndRdmaAddRegion(_Inout_ PVIOSND_RDMA Rdma, _In_ U
     ULONG want;
     NTSTATUS status;
 
+    if (KeGetCurrentIrql() != PASSIVE_LEVEL)
+    {
+        /* The pool cannot be reached from here. Every allocation this driver makes is on the
+         * device-start or stream-start path, both at PASSIVE_LEVEL; a future caller that is not
+         * gets a failure rather than a blocked machine. */
+        DbgPrint("viosnd rdmapool: cannot take a region at IRQL %u\n", KeGetCurrentIrql());
+        return NULL;
+    }
     if (Rdma->RegionCount >= VIOSND_RDMA_MAX_REGIONS)
     {
         DbgPrint("viosnd rdmapool: region table full (%u)\n", VIOSND_RDMA_MAX_REGIONS);
@@ -79,15 +94,30 @@ static PVIOSND_RDMA_REGION ViosndRdmaAddRegion(_Inout_ PVIOSND_RDMA Rdma, _In_ U
         return NULL;
     }
 
-    region = &Rdma->Regions[Rdma->RegionCount];
-    region->BaseVA = va;
-    region->BasePA = pa;
-    region->Pages = want;
-    region->BitmapBuffer = bitmapBuffer;
-    RtlZeroMemory(bitmapBuffer, bitmapBytes);
-    RtlInitializeBitMap(&region->Bitmap, bitmapBuffer, want);
-    RtlClearAllBits(&region->Bitmap);
-    Rdma->RegionCount++;
+    /* Publish it under the lock; everything above was done without one. */
+    {
+        KIRQL irql;
+
+        KeAcquireSpinLock(&Rdma->Lock, &irql);
+        if (Rdma->RegionCount >= VIOSND_RDMA_MAX_REGIONS)
+        {
+            /* Another thread filled the table while this one was in the IOCTL. */
+            KeReleaseSpinLock(&Rdma->Lock, irql);
+            ExFreePoolWithTag(bitmapBuffer, VIOSND_RDMA_TAG);
+            RdmaClientFreeRegion(&Rdma->Client, va, want);
+            return NULL;
+        }
+        region = &Rdma->Regions[Rdma->RegionCount];
+        region->BaseVA = va;
+        region->BasePA = pa;
+        region->Pages = want;
+        region->BitmapBuffer = bitmapBuffer;
+        RtlZeroMemory(bitmapBuffer, bitmapBytes);
+        RtlInitializeBitMap(&region->Bitmap, bitmapBuffer, want);
+        RtlClearAllBits(&region->Bitmap);
+        Rdma->RegionCount++;
+        KeReleaseSpinLock(&Rdma->Lock, irql);
+    }
 
     DbgPrint("viosnd rdmapool: region %u = %u pages at VA=%p PA=0x%I64x\n",
              Rdma->RegionCount - 1,
@@ -139,10 +169,15 @@ _Ret_maybenull_ PVOID ViosndRdmaAlloc(_Inout_ PVIOSND_RDMA Rdma,
         return NULL;
     }
 
-    KeAcquireSpinLock(&Rdma->Lock, &irql);
-
+    /*
+     * Two passes: satisfy from what is already held, and if nothing has a long enough run, take
+     * one more region and look again. The region is taken with the lock released -- reaching the
+     * pool blocks on an IOCTL -- so the second pass re-examines every region rather than only
+     * the new one: another thread may have added or freed space in between.
+     */
     for (ULONG attempt = 0; attempt < 2 && va == NULL; ++attempt)
     {
+        KeAcquireSpinLock(&Rdma->Lock, &irql);
         for (ULONG i = 0; i < Rdma->RegionCount; ++i)
         {
             PVIOSND_RDMA_REGION region = &Rdma->Regions[i];
@@ -161,17 +196,13 @@ _Ret_maybenull_ PVOID ViosndRdmaAlloc(_Inout_ PVIOSND_RDMA Rdma,
             LogicalAddress->QuadPart = region->BasePA.QuadPart + ((LONGLONG)index * PAGE_SIZE);
             break;
         }
+        KeReleaseSpinLock(&Rdma->Lock, irql);
 
-        /* Nothing had a long enough run. One more region, then try again --
-         * and only once, so a pool that cannot serve this size fails here
-         * rather than looping. */
         if (va == NULL && attempt == 0 && ViosndRdmaAddRegion(Rdma, pages) == NULL)
         {
             break;
         }
     }
-
-    KeReleaseSpinLock(&Rdma->Lock, irql);
 
     if (va == NULL)
     {
