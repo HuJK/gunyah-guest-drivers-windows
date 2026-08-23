@@ -32,12 +32,35 @@ ViosndRdmaConnect(_Inout_ PVIOSND_RDMA Rdma, _In_ ULONG RingPages, _In_ ULONG Da
     RtlZeroMemory(Rdma, sizeof(*Rdma));
     KeInitializeSpinLock(&Rdma->Lock);
 
-    /* MetaPages is 0: viosnd does not use the client library's fixed-slot
-     * bounce allocator, it sub-allocates the whole region itself. */
-    status = RdmaClientConnectEx(&Rdma->Client, "viosnd", RingPages, 0, DataPages);
-    if (!NT_SUCCESS(status))
+    /*
+     * MetaPages is 0: viosnd does not use the client library's fixed-slot
+     * bounce allocator, it sub-allocates the whole region itself.
+     *
+     * The pool is shared, and the other clients take from it on terms this
+     * driver does not control -- viostor claims half of it at once, NetKVM
+     * grows into it a buffer at a time. So a refusal here says nothing about
+     * whether a smaller region would work, and giving up on the first one
+     * costs the user every endpoint on the card. Halve and retry down to the
+     * floor; a card staging fewer periods still plays.
+     */
+    for (ULONG pages = DataPages;; pages /= 2)
     {
-        return status;
+        status = RdmaClientConnectEx(&Rdma->Client, "viosnd", RingPages, 0, pages);
+        if (NT_SUCCESS(status))
+        {
+            break;
+        }
+        if (status != STATUS_INSUFFICIENT_RESOURCES || pages / 2 < VIOSND_RDMA_MIN_DATA_PAGES)
+        {
+            /* Either the pool is not there at all, or it is there and even the
+             * floor does not fit. Neither gets better by asking again. */
+            return status;
+        }
+        DbgPrintEx(DPFLTR_IHVDRIVER_ID,
+                   DPFLTR_ERROR_LEVEL,
+                   "viosnd: rdmapool refused %u data pages, retrying with %u\n",
+                   pages,
+                   pages / 2);
     }
 
     pageCount = (ULONG)(Rdma->Client.Size / PAGE_SIZE);
