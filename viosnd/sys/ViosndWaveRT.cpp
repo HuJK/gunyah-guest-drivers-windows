@@ -557,6 +557,11 @@ private:
     ULONG m_CapturePositionQueries;
     ULONG m_CaptureReadPackets;
     ULONG m_CaptureSubmitOk;
+    /* Loudest sample seen arriving from the host, and after the driver's own copy. The two
+     * separate "the host is sending silence" from "the guest is not delivering what arrived". */
+    ULONG m_CaptureMaxInputPeak;
+    ULONG m_CaptureMaxOutputPeak;
+    ULONG m_CaptureBytesCopied;
     ULONG m_CaptureSubmitFail;
     NTSTATUS m_CaptureLastSubmitStatus;
     ULONG m_RenderFallbackPhase;
@@ -655,6 +660,9 @@ CViosndMiniportWaveRTStream::CViosndMiniportWaveRTStream(
     m_CapturePositionQueries(0),
     m_CaptureReadPackets(0),
     m_CaptureSubmitOk(0),
+    m_CaptureMaxInputPeak(0),
+    m_CaptureMaxOutputPeak(0),
+    m_CaptureBytesCopied(0),
     m_CaptureSubmitFail(0),
     m_CaptureLastSubmitStatus(STATUS_SUCCESS),
     m_RenderFallbackPhase(0),
@@ -1292,6 +1300,14 @@ CViosndMiniportWaveRTStream::ReclaimCapturePackets()
                                              copyLength,
                                              VIOSND_CAPTURE_SOFTWARE_GAIN);
 #endif
+
+            if (inputPeak > m_CaptureMaxInputPeak) {
+                m_CaptureMaxInputPeak = inputPeak;
+            }
+            if (outputPeak > m_CaptureMaxOutputPeak) {
+                m_CaptureMaxOutputPeak = outputPeak;
+            }
+            m_CaptureBytesCopied += copyLength;
 
             if (bytesRead < m_PacketSize) {
                 RtlZeroMemory(destination + bytesRead, m_PacketSize - bytesRead);
@@ -1932,7 +1948,7 @@ CViosndMiniportWaveRTStream::CaptureWorkerLoop()
                                            SIZEOF_ARRAY(text),
                                            L"exit: state=%u loops=%u ok=%u fail=%u "
                                            L"inFlight=%u next=%u read=%u posq=%u pos=%llu "
-                                           L"done=%u ready=%u evt=%u",
+                                           L"done=%u inPeak=%u outPeak=%u copied=%u",
                                            m_State,
                                            diagTicks,
                                            m_CaptureSubmitOk,
@@ -1943,8 +1959,9 @@ CViosndMiniportWaveRTStream::CaptureWorkerLoop()
                                            m_CapturePositionQueries,
                                            m_Position,
                                            m_PacketNumber,
-                                           m_OutstandingWrites,
-                                           m_NotificationEvent != NULL ? 1u : 0u))) {
+                                           m_CaptureMaxInputPeak,
+                                           m_CaptureMaxOutputPeak,
+                                           m_CaptureBytesCopied))) {
             ViosndRecordDiag(m_Device, L"CaptureWorker", text);
         }
     }
