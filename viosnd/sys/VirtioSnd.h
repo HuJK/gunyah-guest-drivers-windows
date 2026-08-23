@@ -25,14 +25,37 @@ typedef struct virtio_snd_config {
  */
 #define VIOSND_VENDOR_CFG_OFFSET  64u          /* not 16: leave the spec room to grow */
 #define VIOSND_VENDOR_CFG_MAGIC   0x534d5644u  /* "DVMS" */
-#define VIOSND_VENDOR_CFG_VERSION 1u
+/* Versions only ever append fields, so a driver reads the prefix its own version covers and
+ * ignores the rest. Checking for equality instead would make every host-side addition look like
+ * "no vendor block at all" to an older driver, and it would lose the settings it does
+ * understand -- which is worse than the addition it does not. */
+#define VIOSND_VENDOR_CFG_MIN_VERSION 1u
+#define VIOSND_VENDOR_CFG_VERSION     2u
 
+/* Per-direction cap on the preferred-format hints, matching the host's block. */
+#define VIOSND_VENDOR_CFG_MAX_DEVICES 8u
+
+typedef struct viosnd_vendor_preferred {
+    u32 rate;     /* the host endpoint's own sample rate; 0 = unknown */
+    u32 channels; /* the host endpoint's own channel count; 0 = unknown */
+} VIOSND_VENDOR_PREFERRED, *PVIOSND_VENDOR_PREFERRED;
+
+/* Version 1 stops after period_bytes. */
 typedef struct viosnd_vendor_config {
     u32 magic;
     u32 version;
     u32 outstanding_packets; /* periods to keep in flight; 0 = driver default */
     u32 period_bytes;        /* preferred period size; 0 = no preference */
+    /* Version 2 onwards. Indexed by hda_fn_nid, separately per direction because output device
+     * 0 and input device 0 both report nid 0. */
+    u32 preferred_output_count;
+    u32 preferred_input_count;
+    VIOSND_VENDOR_PREFERRED preferred_output[VIOSND_VENDOR_CFG_MAX_DEVICES];
+    VIOSND_VENDOR_PREFERRED preferred_input[VIOSND_VENDOR_CFG_MAX_DEVICES];
 } VIOSND_VENDOR_CONFIG, *PVIOSND_VENDOR_CONFIG;
+
+#define VIOSND_VENDOR_CFG_V1_SIZE \
+    (FIELD_OFFSET(VIOSND_VENDOR_CONFIG, period_bytes) + sizeof(u32))
 
 enum {
     VIRTIO_SND_VQ_CONTROL = 0,

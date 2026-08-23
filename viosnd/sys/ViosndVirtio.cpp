@@ -801,12 +801,16 @@ ViosndInitVirtio(
      * whatever the transport reads past its config length, so the magic is what makes this
      * safe: no match, no settings, built-in defaults. */
     RtlZeroMemory(&Device->VendorConfig, sizeof(Device->VendorConfig));
+    /* Read the version-1 prefix first. Reading the whole struct up front would, on a host that
+     * publishes only version 1, pull in whatever lies past its config length and then decide
+     * what to believe about it -- so ask for the part every version has, and only then for the
+     * part this one says it has. */
     virtio_get_config(&Device->Vdev,
                       VIOSND_VENDOR_CFG_OFFSET,
                       &Device->VendorConfig,
-                      sizeof(Device->VendorConfig));
+                      VIOSND_VENDOR_CFG_V1_SIZE);
     if (Device->VendorConfig.magic != VIOSND_VENDOR_CFG_MAGIC ||
-        Device->VendorConfig.version != VIOSND_VENDOR_CFG_VERSION) {
+        Device->VendorConfig.version < VIOSND_VENDOR_CFG_MIN_VERSION) {
         VIOSND_LOG(DPFLTR_IHVDRIVER_ID,
                    DPFLTR_ERROR_LEVEL,
                    "viosnd: no vendor config (magic=0x%08x version=%u), using defaults\n",
@@ -814,11 +818,27 @@ ViosndInitVirtio(
                    Device->VendorConfig.version);
         RtlZeroMemory(&Device->VendorConfig, sizeof(Device->VendorConfig));
     } else {
+        if (Device->VendorConfig.version >= 2u) {
+            virtio_get_config(&Device->Vdev,
+                              VIOSND_VENDOR_CFG_OFFSET + VIOSND_VENDOR_CFG_V1_SIZE,
+                              (PUCHAR)&Device->VendorConfig + VIOSND_VENDOR_CFG_V1_SIZE,
+                              sizeof(Device->VendorConfig) - VIOSND_VENDOR_CFG_V1_SIZE);
+            if (Device->VendorConfig.preferred_output_count > VIOSND_VENDOR_CFG_MAX_DEVICES) {
+                Device->VendorConfig.preferred_output_count = VIOSND_VENDOR_CFG_MAX_DEVICES;
+            }
+            if (Device->VendorConfig.preferred_input_count > VIOSND_VENDOR_CFG_MAX_DEVICES) {
+                Device->VendorConfig.preferred_input_count = VIOSND_VENDOR_CFG_MAX_DEVICES;
+            }
+        }
         VIOSND_LOG(DPFLTR_IHVDRIVER_ID,
                    DPFLTR_ERROR_LEVEL,
-                   "viosnd: vendor config outstanding=%u period_bytes=%u\n",
+                   "viosnd: vendor config v%u outstanding=%u period_bytes=%u "
+                   "preferred out=%u in=%u\n",
+                   Device->VendorConfig.version,
                    Device->VendorConfig.outstanding_packets,
-                   Device->VendorConfig.period_bytes);
+                   Device->VendorConfig.period_bytes,
+                   Device->VendorConfig.preferred_output_count,
+                   Device->VendorConfig.preferred_input_count);
     }
 
     return STATUS_SUCCESS;
@@ -1488,20 +1508,30 @@ ViosndPcmInfoLooksEmpty(
     return TRUE;
 }
 
-NTSTATUS
-ViosndQueryPcmStreams(
+/*
+ * Fetches the device's PCM stream descriptions.
+ *
+ * The retry loop is not defensive padding: a backend that has only just come up answers the
+ * first PCM_INFO with a zeroed response, and taking that at face value makes the device look
+ * like it has no usable streams at all. Retrying is what turns a race into a wait.
+ */
+static NTSTATUS
+ViosndFetchPcmInfo(
     _Inout_ PVIOSND_DEVICE Device,
-    _Out_ PVIOSND_STREAM_PAIR Pair)
+    _Out_writes_to_(MaxCount, *CountOut) VIRTIO_SND_PCM_INFO *Info,
+    _In_ ULONG MaxCount,
+    _Out_ PULONG CountOut)
 {
     VIRTIO_SND_QUERY_INFO query;
     PUCHAR response;
     VIRTIO_SND_HDR responseHeader;
-    VIRTIO_SND_PCM_INFO info[VIOSND_MAX_PCM_STREAMS];
     ULONG streamCount;
     ULONG responseLength;
-    NTSTATUS status;
+    NTSTATUS status = STATUS_NOT_FOUND;
 
-    streamCount = min(Device->Config.streams, VIOSND_MAX_PCM_STREAMS);
+    *CountOut = 0;
+
+    streamCount = min(Device->Config.streams, MaxCount);
     if (streamCount == 0) {
         VIOSND_LOG(DPFLTR_IHVDRIVER_ID,
                    DPFLTR_ERROR_LEVEL,
@@ -1525,7 +1555,7 @@ ViosndQueryPcmStreams(
 
     for (ULONG attempt = 0; attempt < VIOSND_PCM_INFO_RETRY_COUNT; ++attempt) {
         RtlZeroMemory(response, responseLength);
-        RtlZeroMemory(info, sizeof(info));
+        RtlZeroMemory(Info, streamCount * sizeof(VIRTIO_SND_PCM_INFO));
         RtlZeroMemory(&responseHeader, sizeof(responseHeader));
 
         status = ViosndControlCommand(Device,
@@ -1538,7 +1568,7 @@ ViosndQueryPcmStreams(
         }
 
         RtlCopyMemory(&responseHeader, response, sizeof(responseHeader));
-        RtlCopyMemory(info,
+        RtlCopyMemory(Info,
                       response + sizeof(VIRTIO_SND_HDR),
                       streamCount * sizeof(VIRTIO_SND_PCM_INFO));
         VIOSND_LOG(DPFLTR_IHVDRIVER_ID,
@@ -1549,22 +1579,25 @@ ViosndQueryPcmStreams(
         for (ULONG i = 0; i < streamCount; ++i) {
             VIOSND_LOG(DPFLTR_IHVDRIVER_ID,
                        DPFLTR_ERROR_LEVEL,
-                       "viosnd: stream[%u] dir=%u ch=%u-%u formats=0x%llx rates=0x%llx features=0x%x\n",
+                       "viosnd: stream[%u] nid=%u dir=%u ch=%u-%u formats=0x%llx rates=0x%llx "
+                       "features=0x%x\n",
                        i,
-                       info[i].direction,
-                       info[i].channels_min,
-                       info[i].channels_max,
-                       info[i].formats,
-                       info[i].rates,
-                       info[i].features);
+                       Info[i].hdr.hda_fn_nid,
+                       Info[i].direction,
+                       Info[i].channels_min,
+                       Info[i].channels_max,
+                       Info[i].formats,
+                       Info[i].rates,
+                       Info[i].features);
         }
 
         if (responseHeader.code == 0 ||
             (responseHeader.code == VIRTIO_SND_S_OK &&
-             ViosndPcmInfoLooksEmpty(info, streamCount))) {
+             ViosndPcmInfoLooksEmpty(Info, streamCount))) {
             VIOSND_LOG(DPFLTR_IHVDRIVER_ID,
                        DPFLTR_WARNING_LEVEL,
-                       "viosnd: PCM_INFO invalid/empty response attempt=%u status=0x%08x retrying\n",
+                       "viosnd: PCM_INFO invalid/empty response attempt=%u status=0x%08x "
+                       "retrying\n",
                        attempt + 1,
                        responseHeader.code);
 
@@ -1577,17 +1610,11 @@ ViosndQueryPcmStreams(
             }
         }
 
-        status = responseHeader.code == VIRTIO_SND_S_OK
-                     ? ViosndFindStreamPair(info, streamCount, Pair)
-                     : STATUS_NOT_SUPPORTED;
-        if (NT_SUCCESS(status)) {
-            VIOSND_LOG(DPFLTR_IHVDRIVER_ID,
-                       DPFLTR_ERROR_LEVEL,
-                       "viosnd: selected render=%u/%u capture=%u/%u\n",
-                       Pair->HasRender,
-                       Pair->RenderStreamId,
-                       Pair->HasCapture,
-                       Pair->CaptureStreamId);
+        if (responseHeader.code == VIRTIO_SND_S_OK) {
+            *CountOut = streamCount;
+            status = STATUS_SUCCESS;
+        } else {
+            status = STATUS_NOT_SUPPORTED;
         }
         break;
     }
@@ -1600,6 +1627,62 @@ ViosndQueryPcmStreams(
     }
 
     ExFreePoolWithTag(response, VIOSND_POOL_TAG);
+    return status;
+}
+
+NTSTATUS
+ViosndEnumerateEndpoints(
+    _Inout_ PVIOSND_DEVICE Device,
+    _Out_ PVIOSND_ENDPOINT_SET Set)
+{
+    VIRTIO_SND_PCM_INFO info[VIOSND_MAX_PCM_STREAMS];
+    ULONG count = 0;
+    NTSTATUS status;
+
+    RtlZeroMemory(Set, sizeof(*Set));
+
+    status = ViosndFetchPcmInfo(Device, info, VIOSND_MAX_PCM_STREAMS, &count);
+    if (!NT_SUCCESS(status)) {
+        return status;
+    }
+
+    status = ViosndGroupEndpoints(info, count, &Device->VendorConfig, Set);
+    if (NT_SUCCESS(status)) {
+        VIOSND_LOG(DPFLTR_IHVDRIVER_ID,
+                   DPFLTR_ERROR_LEVEL,
+                   "viosnd: %u render + %u capture endpoint(s) from %u stream(s), %u unused\n",
+                   Set->RenderCount,
+                   Set->CaptureCount,
+                   count,
+                   Set->DroppedStreams);
+    }
+    return status;
+}
+
+NTSTATUS
+ViosndQueryPcmStreams(
+    _Inout_ PVIOSND_DEVICE Device,
+    _Out_ PVIOSND_STREAM_PAIR Pair)
+{
+    VIRTIO_SND_PCM_INFO info[VIOSND_MAX_PCM_STREAMS];
+    ULONG count = 0;
+    NTSTATUS status;
+
+    status = ViosndFetchPcmInfo(Device, info, VIOSND_MAX_PCM_STREAMS, &count);
+    if (!NT_SUCCESS(status)) {
+        return status;
+    }
+
+    status = ViosndFindStreamPair(info, count, Pair);
+    if (NT_SUCCESS(status)) {
+        VIOSND_LOG(DPFLTR_IHVDRIVER_ID,
+                   DPFLTR_ERROR_LEVEL,
+                   "viosnd: selected render=%u/%u capture=%u/%u\n",
+                   Pair->HasRender,
+                   Pair->RenderStreamId,
+                   Pair->HasCapture,
+                   Pair->CaptureStreamId);
+    }
     return status;
 }
 

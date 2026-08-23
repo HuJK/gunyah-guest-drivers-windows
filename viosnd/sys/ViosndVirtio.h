@@ -34,6 +34,12 @@ VOID
 ViosndKickTxQueue(
     _Inout_ PVIOSND_DEVICE Device);
 
+/* Groups the device's PCM streams into the endpoints this driver will expose. */
+NTSTATUS
+ViosndEnumerateEndpoints(
+    _Inout_ PVIOSND_DEVICE Device,
+    _Out_ PVIOSND_ENDPOINT_SET Set);
+
 NTSTATUS
 ViosndQueryPcmStreams(
     _Inout_ PVIOSND_DEVICE Device,
