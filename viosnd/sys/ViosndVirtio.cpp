@@ -63,6 +63,8 @@ struct _VIOSND_DEVICE {
      * Gunyah VM, where the ordinary common-buffer path is device-visible. */
     VIOSND_RDMA Rdma;
     VirtIODevice Vdev;
+    /* Host-chosen guest settings, or all-zero when the device does not publish them. */
+    VIOSND_VENDOR_CONFIG VendorConfig;
     BOOLEAN VirtioInitialized;
     struct virtqueue *Queues[VIRTIO_SND_VQ_MAX];
     KMUTEX ControlQueueMutex;
@@ -794,6 +796,31 @@ ViosndInitVirtio(
 
     virtio_get_config(&Device->Vdev, 0, &Device->Config, sizeof(Device->Config));
 
+    /* The vendor block sits at a fixed offset well past the spec's four fields, so a future
+     * revision of the spec cannot grow into it. A device that publishes no block gives back
+     * whatever the transport reads past its config length, so the magic is what makes this
+     * safe: no match, no settings, built-in defaults. */
+    RtlZeroMemory(&Device->VendorConfig, sizeof(Device->VendorConfig));
+    virtio_get_config(&Device->Vdev,
+                      VIOSND_VENDOR_CFG_OFFSET,
+                      &Device->VendorConfig,
+                      sizeof(Device->VendorConfig));
+    if (Device->VendorConfig.magic != VIOSND_VENDOR_CFG_MAGIC ||
+        Device->VendorConfig.version != VIOSND_VENDOR_CFG_VERSION) {
+        VIOSND_LOG(DPFLTR_IHVDRIVER_ID,
+                   DPFLTR_ERROR_LEVEL,
+                   "viosnd: no vendor config (magic=0x%08x version=%u), using defaults\n",
+                   Device->VendorConfig.magic,
+                   Device->VendorConfig.version);
+        RtlZeroMemory(&Device->VendorConfig, sizeof(Device->VendorConfig));
+    } else {
+        VIOSND_LOG(DPFLTR_IHVDRIVER_ID,
+                   DPFLTR_ERROR_LEVEL,
+                   "viosnd: vendor config outstanding=%u period_bytes=%u\n",
+                   Device->VendorConfig.outstanding_packets,
+                   Device->VendorConfig.period_bytes);
+    }
+
     return STATUS_SUCCESS;
 
 Fail:
@@ -1395,6 +1422,28 @@ ViosndDestroyDevice(
     }
 
     ExFreePoolWithTag(Device, VIOSND_POOL_TAG);
+}
+
+ULONG
+ViosndApplyHostOutstandingHint(
+    _In_ PVIOSND_DEVICE Device,
+    _In_ ULONG DriverChoice,
+    _In_ ULONG NotificationCount)
+{
+    ULONG hint;
+
+    if (Device == NULL || Device->VendorConfig.magic != VIOSND_VENDOR_CFG_MAGIC) {
+        return DriverChoice;
+    }
+    hint = Device->VendorConfig.outstanding_packets;
+    if (hint == 0) {
+        return DriverChoice;
+    }
+    /* Never past what the OS has actually written. */
+    if (NotificationCount > 1 && hint > NotificationCount - 1) {
+        hint = NotificationCount - 1;
+    }
+    return hint > DriverChoice ? hint : DriverChoice;
 }
 
 NTSTATUS

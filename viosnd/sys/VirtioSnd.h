@@ -13,6 +13,27 @@ typedef struct virtio_snd_config {
     u32 controls;
 } VIRTIO_SND_CONFIG, *PVIRTIO_SND_CONFIG;
 
+/*
+ * DroidVM vendor block, published by crosvm immediately after the spec's config.
+ *
+ * The spec's own layout ends at 16 bytes (the fourth u32 is `controls`, valid only with
+ * VIRTIO_SND_F_CTLS and zero otherwise), so a vendor is free to build from there. It carries the
+ * settings that belong to the guest driver but are chosen host-side -- how much audio to keep in
+ * flight is a latency decision the user makes in the app, not something a driver can know.
+ *
+ * Absent or mismatched magic means an ordinary virtio-snd device: keep the built-in defaults.
+ */
+#define VIOSND_VENDOR_CFG_OFFSET  64u          /* not 16: leave the spec room to grow */
+#define VIOSND_VENDOR_CFG_MAGIC   0x534d5644u  /* "DVMS" */
+#define VIOSND_VENDOR_CFG_VERSION 1u
+
+typedef struct viosnd_vendor_config {
+    u32 magic;
+    u32 version;
+    u32 outstanding_packets; /* periods to keep in flight; 0 = driver default */
+    u32 period_bytes;        /* preferred period size; 0 = no preference */
+} VIOSND_VENDOR_CONFIG, *PVIOSND_VENDOR_CONFIG;
+
 enum {
     VIRTIO_SND_VQ_CONTROL = 0,
     VIRTIO_SND_VQ_EVENT,

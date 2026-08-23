@@ -1695,6 +1695,12 @@ CViosndMiniportWaveRTStream::RenderWorkerLoop()
                                     ViosndCyclicTargetOutstandingPackets(m_NotificationCount) :
                                     ViosndTargetOutstandingPackets(m_NotificationCount);
         }
+        /* The host may have an opinion, set by the user as a latency choice rather than guessed
+         * by the driver. It can only raise the floor, never exceed NotificationCount - 1: the
+         * pump must not send a packet the OS has not written. Zero means no opinion. */
+        targetOutstanding = ViosndApplyHostOutstandingHint(m_Device,
+                                                           targetOutstanding,
+                                                           m_NotificationCount);
         while (m_State == KSSTATE_RUN &&
                m_OutstandingWrites < targetOutstanding) {
             ULONG packetLength = m_PacketSize;

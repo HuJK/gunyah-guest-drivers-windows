@@ -14,6 +14,14 @@ VOID
 ViosndDestroyDevice(
     _In_opt_ PVIOSND_DEVICE Device);
 
+/* Raise the render pump's in-flight target to the host's hint, if it published one and it is
+ * safe (never beyond NotificationCount - 1). Returns DriverChoice unchanged otherwise. */
+ULONG
+ViosndApplyHostOutstandingHint(
+    _In_ PVIOSND_DEVICE Device,
+    _In_ ULONG DriverChoice,
+    _In_ ULONG NotificationCount);
+
 NTSTATUS
 ViosndInitializeDevice(
     _Inout_ PVIOSND_DEVICE Device);
