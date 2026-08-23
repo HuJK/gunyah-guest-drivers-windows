@@ -69,6 +69,37 @@ ViosndReadDeviceDword(
     return value;
 }
 
+/*
+ * Records a line of driver state under the device's own registry key.
+ *
+ * The alternative is DbgPrint, which needs a kernel debugger attached to be visible at all --
+ * so on a machine nobody is debugging, the driver's account of what it decided simply does not
+ * exist. A value here can be read back from anywhere that can reach the registry, long after
+ * the fact, which is what makes it useful for the questions that only come up later: which
+ * version of the vendor block the host published, and what the driver did with it.
+ */
+VOID
+ViosndWriteDeviceDiagString(
+    _In_ PDEVICE_OBJECT PhysicalDeviceObject,
+    _In_z_ PCWSTR ValueName,
+    _In_z_ PCWSTR Value)
+{
+    HANDLE key = NULL;
+    UNICODE_STRING name;
+    UNICODE_STRING value;
+
+    if (!NT_SUCCESS(IoOpenDeviceRegistryKey(PhysicalDeviceObject,
+                                            PLUGPLAY_REGKEY_DEVICE,
+                                            KEY_SET_VALUE,
+                                            &key))) {
+        return;
+    }
+    RtlInitUnicodeString(&name, ValueName);
+    RtlInitUnicodeString(&value, Value);
+    (VOID)ZwSetValueKey(key, &name, 0, REG_SZ, value.Buffer, value.Length + sizeof(WCHAR));
+    ZwClose(key);
+}
+
 static
 VOID
 ViosndWriteDeviceInitDiag(

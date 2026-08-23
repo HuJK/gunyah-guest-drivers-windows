@@ -76,6 +76,10 @@ struct _VIOSND_DEVICE {
     ULONG EventBufferCount;
 };
 
+static VOID
+ViosndRecordVendorConfig(
+    _In_ PVIOSND_DEVICE Device);
+
 static NTSTATUS
 ViosndPnpCompletion(
     _In_ PDEVICE_OBJECT DeviceObject,
@@ -840,6 +844,8 @@ ViosndInitVirtio(
                    Device->VendorConfig.preferred_output_count,
                    Device->VendorConfig.preferred_input_count);
     }
+
+    ViosndRecordVendorConfig(Device);
 
     return STATUS_SUCCESS;
 
@@ -1628,6 +1634,49 @@ ViosndFetchPcmInfo(
 
     ExFreePoolWithTag(response, VIOSND_POOL_TAG);
     return status;
+}
+
+/*
+ * Writes what the host published, and what came of it, where it can be read back later.
+ *
+ * Everything here is otherwise only visible through DbgPrint, which needs a debugger attached
+ * -- so on any machine that is merely running, rather than being debugged, the answer to "did
+ * the host's settings reach the driver" does not exist anywhere. It is exactly the question
+ * that gets asked after the fact.
+ */
+static VOID
+ViosndRecordVendorConfig(
+    _In_ PVIOSND_DEVICE Device)
+{
+    WCHAR text[192];
+
+    if (Device->PhysicalDeviceObject == NULL) {
+        return;
+    }
+    if (Device->VendorConfig.magic != VIOSND_VENDOR_CFG_MAGIC) {
+        ViosndWriteDeviceDiagString(Device->PhysicalDeviceObject,
+                                    L"HostVendorConfig",
+                                    L"absent; driver defaults");
+        return;
+    }
+    if (!NT_SUCCESS(RtlStringCchPrintfW(text,
+                                        SIZEOF_ARRAY(text),
+                                        L"v%u outstanding=%u period=%u out=%u in=%u "
+                                        L"out0=%uHz/%uch/kind%u in0=%uHz/%uch/kind%u",
+                                        Device->VendorConfig.version,
+                                        Device->VendorConfig.outstanding_packets,
+                                        Device->VendorConfig.period_bytes,
+                                        Device->VendorConfig.preferred_output_count,
+                                        Device->VendorConfig.preferred_input_count,
+                                        Device->VendorConfig.preferred_output[0].rate,
+                                        Device->VendorConfig.preferred_output[0].channels,
+                                        Device->VendorConfig.preferred_output[0].kind,
+                                        Device->VendorConfig.preferred_input[0].rate,
+                                        Device->VendorConfig.preferred_input[0].channels,
+                                        Device->VendorConfig.preferred_input[0].kind))) {
+        return;
+    }
+    ViosndWriteDeviceDiagString(Device->PhysicalDeviceObject, L"HostVendorConfig", text);
 }
 
 NTSTATUS
