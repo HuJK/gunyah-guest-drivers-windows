@@ -71,11 +71,7 @@ NTSTATUS RdmaClientConnect(PRDMA_CLIENT c, const char *Tag, ULONG RingPages, ULO
     return RdmaClientConnectEx(c, Tag, RingPages, MetaPages, RDMA_CLIENT_DEFAULT_DATA_PAGES);
 }
 
-NTSTATUS RdmaClientConnectEx(PRDMA_CLIENT c,
-                             const char *Tag,
-                             ULONG RingPages,
-                             ULONG MetaPages,
-                             ULONG MaxDataPages)
+NTSTATUS RdmaClientConnectEx(PRDMA_CLIENT c, const char *Tag, ULONG RingPages, ULONG MetaPages, ULONG MaxDataPages)
 {
     NTSTATUS status;
     PWSTR deviceInterfaceList = NULL;

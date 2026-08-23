@@ -99,11 +99,7 @@ NTSTATUS RdmaClientConnect(PRDMA_CLIENT c, const char *Tag, ULONG RingPages, ULO
  * small -- viosnd stages a handful of period buffers, not a disk queue -- must
  * not reserve a 32MB slice of a pool every other pVM driver shares.
  */
-NTSTATUS RdmaClientConnectEx(PRDMA_CLIENT c,
-                             const char *Tag,
-                             ULONG RingPages,
-                             ULONG MetaPages,
-                             ULONG MaxDataPages);
+NTSTATUS RdmaClientConnectEx(PRDMA_CLIENT c, const char *Tag, ULONG RingPages, ULONG MetaPages, ULONG MaxDataPages);
 VOID RdmaClientDisconnect(PRDMA_CLIENT c);
 
 /* VA<->PA within the contiguous rdmapool region. */

@@ -32,7 +32,8 @@
 #ifndef _VIOSNDRDMA_H_
 #define _VIOSNDRDMA_H_
 
-extern "C" {
+extern "C"
+{
 #include "rdmaclient.h"
 }
 
@@ -58,7 +59,8 @@ extern "C" {
  */
 #define VIOSND_RDMA_DATA_PAGES 1024u
 
-typedef struct _VIOSND_RDMA {
+typedef struct _VIOSND_RDMA
+{
     RDMA_CLIENT Client;
     /* Guards the bitmap. Allocation happens at PASSIVE_LEVEL (device init and
      * stream start); the lock is still taken at DISPATCH so a future caller on
@@ -88,10 +90,9 @@ __forceinline BOOLEAN ViosndRdmaActive(_In_ PVIOSND_RDMA Rdma)
  * Allocate Size bytes (rounded up to pages) from the pool and report the
  * physical address the device must be given. NULL when the region is full.
  */
-_Ret_maybenull_
-PVOID ViosndRdmaAlloc(_Inout_ PVIOSND_RDMA Rdma,
-                      _In_ SIZE_T Size,
-                      _Out_ PPHYSICAL_ADDRESS LogicalAddress);
+_Ret_maybenull_ PVOID ViosndRdmaAlloc(_Inout_ PVIOSND_RDMA Rdma,
+                                      _In_ SIZE_T Size,
+                                      _Out_ PPHYSICAL_ADDRESS LogicalAddress);
 
 /* Return a block. Size must be the size passed to ViosndRdmaAlloc. */
 VOID ViosndRdmaFree(_Inout_ PVIOSND_RDMA Rdma, _In_opt_ PVOID Va, _In_ SIZE_T Size);

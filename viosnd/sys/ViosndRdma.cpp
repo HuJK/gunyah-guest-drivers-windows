@@ -11,23 +11,19 @@
 
 #define VIOSND_RDMA_TAG 'RdnS'
 
-static ULONG
-ViosndRdmaPagesFor(
-    _In_ SIZE_T Size)
+static ULONG ViosndRdmaPagesFor(_In_ SIZE_T Size)
 {
     SIZE_T rounded = ROUND_TO_PAGES(Size);
 
-    if (rounded == 0) {
+    if (rounded == 0)
+    {
         return 0;
     }
     return (ULONG)(rounded / PAGE_SIZE);
 }
 
 NTSTATUS
-ViosndRdmaConnect(
-    _Inout_ PVIOSND_RDMA Rdma,
-    _In_ ULONG RingPages,
-    _In_ ULONG DataPages)
+ViosndRdmaConnect(_Inout_ PVIOSND_RDMA Rdma, _In_ ULONG RingPages, _In_ ULONG DataPages)
 {
     NTSTATUS status;
     ULONG pageCount;
@@ -39,22 +35,23 @@ ViosndRdmaConnect(
     /* MetaPages is 0: viosnd does not use the client library's fixed-slot
      * bounce allocator, it sub-allocates the whole region itself. */
     status = RdmaClientConnectEx(&Rdma->Client, "viosnd", RingPages, 0, DataPages);
-    if (!NT_SUCCESS(status)) {
+    if (!NT_SUCCESS(status))
+    {
         return status;
     }
 
     pageCount = (ULONG)(Rdma->Client.Size / PAGE_SIZE);
-    if (pageCount == 0) {
+    if (pageCount == 0)
+    {
         RdmaClientDisconnect(&Rdma->Client);
         return STATUS_INSUFFICIENT_RESOURCES;
     }
 
     /* RtlInitializeBitMap wants a ULONG-aligned buffer sized in whole ULONGs. */
     bitmapBytes = ((SIZE_T)((pageCount + 31) / 32)) * sizeof(ULONG);
-    Rdma->BitmapBuffer = (PULONG)ExAllocatePoolUninitialized(NonPagedPoolNx,
-                                                             bitmapBytes,
-                                                             VIOSND_RDMA_TAG);
-    if (Rdma->BitmapBuffer == NULL) {
+    Rdma->BitmapBuffer = (PULONG)ExAllocatePoolUninitialized(NonPagedPoolNx, bitmapBytes, VIOSND_RDMA_TAG);
+    if (Rdma->BitmapBuffer == NULL)
+    {
         RdmaClientDisconnect(&Rdma->Client);
         return STATUS_INSUFFICIENT_RESOURCES;
     }
@@ -72,11 +69,10 @@ ViosndRdmaConnect(
     return STATUS_SUCCESS;
 }
 
-VOID
-ViosndRdmaDisconnect(
-    _Inout_ PVIOSND_RDMA Rdma)
+VOID ViosndRdmaDisconnect(_Inout_ PVIOSND_RDMA Rdma)
 {
-    if (Rdma->BitmapBuffer != NULL) {
+    if (Rdma->BitmapBuffer != NULL)
+    {
         ExFreePoolWithTag(Rdma->BitmapBuffer, VIOSND_RDMA_TAG);
         Rdma->BitmapBuffer = NULL;
     }
@@ -84,12 +80,9 @@ ViosndRdmaDisconnect(
     RdmaClientDisconnect(&Rdma->Client);
 }
 
-_Ret_maybenull_
-PVOID
-ViosndRdmaAlloc(
-    _Inout_ PVIOSND_RDMA Rdma,
-    _In_ SIZE_T Size,
-    _Out_ PPHYSICAL_ADDRESS LogicalAddress)
+_Ret_maybenull_ PVOID ViosndRdmaAlloc(_Inout_ PVIOSND_RDMA Rdma,
+                                      _In_ SIZE_T Size,
+                                      _Out_ PPHYSICAL_ADDRESS LogicalAddress)
 {
     KIRQL irql;
     ULONG pages;
@@ -97,12 +90,14 @@ ViosndRdmaAlloc(
     PVOID va;
 
     LogicalAddress->QuadPart = 0;
-    if (!ViosndRdmaActive(Rdma)) {
+    if (!ViosndRdmaActive(Rdma))
+    {
         return NULL;
     }
 
     pages = ViosndRdmaPagesFor(Size);
-    if (pages == 0 || pages > Rdma->PageCount) {
+    if (pages == 0 || pages > Rdma->PageCount)
+    {
         return NULL;
     }
 
@@ -110,10 +105,9 @@ ViosndRdmaAlloc(
     index = RtlFindClearBitsAndSet(&Rdma->Bitmap, pages, 0);
     KeReleaseSpinLock(&Rdma->Lock, irql);
 
-    if (index == 0xFFFFFFFF) {
-        DbgPrint("viosnd rdmapool: out of pool memory (%u pages of %u)\n",
-                 pages,
-                 Rdma->PageCount);
+    if (index == 0xFFFFFFFF)
+    {
+        DbgPrint("viosnd rdmapool: out of pool memory (%u pages of %u)\n", pages, Rdma->PageCount);
         return NULL;
     }
 
@@ -125,34 +119,34 @@ ViosndRdmaAlloc(
     return va;
 }
 
-VOID
-ViosndRdmaFree(
-    _Inout_ PVIOSND_RDMA Rdma,
-    _In_opt_ PVOID Va,
-    _In_ SIZE_T Size)
+VOID ViosndRdmaFree(_Inout_ PVIOSND_RDMA Rdma, _In_opt_ PVOID Va, _In_ SIZE_T Size)
 {
     KIRQL irql;
     ULONG pages;
     SIZE_T offset;
     ULONG index;
 
-    if (Va == NULL || !ViosndRdmaActive(Rdma)) {
+    if (Va == NULL || !ViosndRdmaActive(Rdma))
+    {
         return;
     }
-    if (!RdmaClientOwnsVA(&Rdma->Client, Va)) {
+    if (!RdmaClientOwnsVA(&Rdma->Client, Va))
+    {
         /* Not ours: the caller mixed a common-buffer block into the pool path. */
         DbgPrint("viosnd rdmapool: free of foreign VA %p ignored\n", Va);
         return;
     }
 
     pages = ViosndRdmaPagesFor(Size);
-    if (pages == 0) {
+    if (pages == 0)
+    {
         return;
     }
 
     offset = (SIZE_T)((PUCHAR)Va - (PUCHAR)Rdma->Client.BaseVA);
     index = (ULONG)(offset / PAGE_SIZE);
-    if (index + pages > Rdma->PageCount) {
+    if (index + pages > Rdma->PageCount)
+    {
         return;
     }
 
