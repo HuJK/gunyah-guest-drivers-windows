@@ -153,6 +153,7 @@
     <ClCompile Include="Driver.cpp" />
     <ClCompile Include="ViosndDebug.cpp" />
     <ClCompile Include="ViosndGuids.cpp" />
+    <ClCompile Include="ViosndFormat.cpp" />
     <ClCompile Include="ViosndPcm.cpp" />
     <ClCompile Include="ViosndTopology.cpp" />
     <ClCompile Include="ViosndVirtio.cpp" />
@@ -164,6 +165,7 @@
     <ClInclude Include="precomp.h" />
     <ClInclude Include="trace.h" />
     <ClInclude Include="VirtioSnd.h" />
+    <ClInclude Include="ViosndFormat.h" />
     <ClInclude Include="ViosndPcm.h" />
     <ClInclude Include="ViosndTopology.h" />
     <ClInclude Include="ViosndVirtio.h" />
