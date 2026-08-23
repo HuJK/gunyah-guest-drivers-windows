@@ -2324,9 +2324,24 @@ CViosndMiniportWaveRTStream::GetPosition(_Out_ PKSAUDIO_POSITION Position)
     if (m_Capture) {
         ULONGLONG recordOffset;
 
+        /*
+         * For a capture stream these two are not the same thing. PlayOffset is how far the
+         * client may safely read; WriteOffset is where the device is writing now. The OS takes
+         * the distance between them as the amount of new audio available, so reporting one
+         * value for both says "nothing to read" -- every time, however much was actually
+         * recorded.
+         *
+         * That is what happened: the driver posted buffers, the device filled them, the
+         * position advanced at exactly the right rate, and the OS polled about ninety times,
+         * saw nothing available on any of them, and stopped the stream after less than half a
+         * second. The recording came back silent with nothing anywhere reporting an error.
+         *
+         * The device has finished writing everything up to m_Position, so that is the read
+         * limit; it is filling the packet after it.
+         */
         recordOffset = m_Position % m_BufferSize;
         Position->PlayOffset = recordOffset;
-        Position->WriteOffset = recordOffset;
+        Position->WriteOffset = (m_Position + m_PacketSize) % m_BufferSize;
         m_CapturePositionQueries++;
         if (m_CapturePositionQueries <= 8 ||
             (m_CapturePositionQueries & 0x7f) == 0) {
