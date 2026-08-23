@@ -2025,6 +2025,7 @@ CViosndMiniportWaveRTStream::SetState(_In_ KSSTATE State)
                            DPFLTR_ERROR_LEVEL,
                            "viosnd: stream %u capture start rejected; capture faulted\n",
                            m_StreamId);
+                ViosndRecordDiag(m_Device, L"CaptureStart", L"rejected: capture faulted latch set");
                 return STATUS_DEVICE_NOT_READY;
             }
             m_PacketNumber = 0;
@@ -2037,19 +2038,45 @@ CViosndMiniportWaveRTStream::SetState(_In_ KSSTATE State)
             m_CapturePositionQueries = 0;
             m_CaptureReadPackets = 0;
             m_Position = 0;
-            status = ViosndConfigureDefaultPcm(m_Device, m_StreamId);
+            NTSTATUS configureStatus;
+            NTSTATUS startStatus = STATUS_UNSUCCESSFUL;
+            NTSTATUS workerStatus = STATUS_UNSUCCESSFUL;
+
+            configureStatus = ViosndConfigureDefaultPcm(m_Device, m_StreamId);
+            status = configureStatus;
             if (NT_SUCCESS(status)) {
-                status = ViosndStartPcm(m_Device, m_StreamId);
+                startStatus = ViosndStartPcm(m_Device, m_StreamId);
+                status = startStatus;
             }
             if (NT_SUCCESS(status)) {
                 m_State = State;
-                status = StartRenderWorker();
+                workerStatus = StartRenderWorker();
+                status = workerStatus;
                 if (!NT_SUCCESS(status)) {
                     ViosndStopPcm(m_Device, m_StreamId);
                     m_State = oldState;
                 }
             } else {
                 m_State = oldState;
+            }
+
+            /* Each of these three can leave the worker unstarted, and each said so only to a
+             * debugger. From the host all three look the same: buffers offered, none taken. */
+            {
+                WCHAR text[160];
+
+                if (NT_SUCCESS(RtlStringCchPrintfW(text,
+                                                   SIZEOF_ARRAY(text),
+                                                   L"configure=0x%08x start=0x%08x worker=0x%08x "
+                                                   L"packet=%u notif=%u buffer=%u",
+                                                   configureStatus,
+                                                   startStatus,
+                                                   workerStatus,
+                                                   m_PacketSize,
+                                                   m_NotificationCount,
+                                                   m_BufferSize))) {
+                    ViosndRecordDiag(m_Device, L"CaptureStart", text);
+                }
             }
         }
     } else if (State != KSSTATE_RUN && oldState == KSSTATE_RUN) {
