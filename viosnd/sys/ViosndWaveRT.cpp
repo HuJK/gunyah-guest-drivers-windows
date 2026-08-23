@@ -1810,7 +1810,20 @@ CViosndMiniportWaveRTStream::CaptureWorkerLoop()
                m_PacketSize,
                m_NotificationCount);
 
-    targetOutstanding = min(VIOSND_CAPTURE_TARGET_OUTSTANDING_PACKETS,
+    /*
+     * The host's in-flight hint applies here too. It was only ever read on the render side, so
+     * choosing a buffer depth in the UI did nothing at all to a microphone -- the capture pump
+     * kept its own constant, and the setting was a control that moved nothing.
+     *
+     * The failure it governs is the mirror image: playback starves when the guest is late with a
+     * period, capture drops audio when the guest has not left a buffer for the host to fill. The
+     * host reports the second as an overrun, and the depth is what decides how much slack there
+     * is before that happens.
+     */
+    targetOutstanding = ViosndApplyHostOutstandingHint(m_Device,
+                                                       VIOSND_CAPTURE_TARGET_OUTSTANDING_PACKETS,
+                                                       m_NotificationCount);
+    targetOutstanding = min(targetOutstanding,
                             min(m_NotificationCount, VIOSND_CAPTURE_IO_POOL_SIZE));
     targetOutstanding = max(targetOutstanding, 1u);
 
