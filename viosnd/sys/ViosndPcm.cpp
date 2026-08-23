@@ -122,15 +122,10 @@ ViosndFindStreamPair(
         Pair->HasCapture = TRUE;
     }
 
-    if (!Pair->HasCapture && InfoCount > 1) {
-        for (ULONG i = 0; i < InfoCount; ++i) {
-            if (!Pair->HasRender || i != Pair->RenderStreamId) {
-                Pair->CaptureStreamId = i;
-                Pair->HasCapture = TRUE;
-                break;
-            }
-        }
-    }
+    // Deliberately no fallback that invents a capture stream out of a spare index: a card that
+    // reports only output streams has only output streams, and pointing a capture endpoint at an
+    // output stream produces an endpoint that can never record. Report what the device has and
+    // let the caller decide what it can expose.
 
     return Pair->HasRender || Pair->HasCapture ? STATUS_SUCCESS : STATUS_NOT_FOUND;
 }

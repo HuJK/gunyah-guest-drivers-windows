@@ -355,14 +355,17 @@ XcbVirtioAudioStartDevice(
         return status;
     }
 
-    if (NT_SUCCESS(status) && enableRender && !streams.HasRender) {
-        status = STATUS_DEVICE_CONFIGURATION_ERROR;
-        ViosndWriteDeviceInitDiag(physicalDeviceObject, L"MissingRenderStream", status);
-    }
-
-    if (NT_SUCCESS(status) && enableCapture && !streams.HasCapture) {
-        status = STATUS_DEVICE_CONFIGURATION_ERROR;
-        ViosndWriteDeviceInitDiag(physicalDeviceObject, L"MissingCaptureStream", status);
+    // EndpointRole is a preference, not a promise. A virtio-snd card carries whatever directions
+    // the host gave it, and one direction is an ordinary configuration -- DroidVM makes a card per
+    // direction so that each can be pinned to its own host endpoint. Expose the intersection of
+    // what was asked for and what exists; only having nothing left to expose is a failure.
+    if (NT_SUCCESS(status)) {
+        enableRender = enableRender && streams.HasRender;
+        enableCapture = enableCapture && streams.HasCapture;
+        if (!enableRender && !enableCapture) {
+            status = STATUS_DEVICE_CONFIGURATION_ERROR;
+            ViosndWriteDeviceInitDiag(physicalDeviceObject, L"NoUsableStream", status);
+        }
     }
 
     if (NT_SUCCESS(status)) {
