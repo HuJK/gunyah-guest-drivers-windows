@@ -16,15 +16,17 @@
 #include "ViosndTopology.h"
 #include "ViosndWaveRT.h"
 
-/* Diagnostics are off upstream, which hides the one thing worth seeing on a pVM:
- * the render worker's "no completion loops=N outstanding=N" line and the
- * NotificationCount the OS handed us, which together say whether TX starvation is
- * the driver running out of packets it is allowed to send ahead. Turned on here
- * while that is under investigation -- DbgPrint needs a consumer (a kernel
- * debugger or DebugView) to be visible at all, so it costs nothing when nobody is
- * looking. Flip back to 0 before this is anything but a debugging branch. */
+/* Verbose tracing, off by default as it is upstream. It was on while TX starvation
+ * was under investigation; that question is answered, and a DbgPrint on the audio
+ * engine's own callback path is not something to ship on the strength of "it costs
+ * nothing when nobody is looking".
+ *
+ * What a machine that is merely running still gets is the registry diagnostics
+ * (ViosndRecordDiag), which need no debugger and are written once per state
+ * transition rather than on a timer. Build with -DVIOSND_ENABLE_LOG=1 to get the
+ * per-loop detail back under a debugger or DebugView. */
 #ifndef VIOSND_ENABLE_LOG
-#define VIOSND_ENABLE_LOG 1
+#define VIOSND_ENABLE_LOG 0
 #endif
 
 #if VIOSND_ENABLE_LOG

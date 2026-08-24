@@ -31,8 +31,6 @@ enum {
 #define VIOSND_RENDER_START_PREROLL_PACKETS 2u
 #define VIOSND_RENDER_CYCLIC_PREROLL_PACKETS VIOSND_RENDER_START_PREROLL_PACKETS
 #define VIOSND_CAPTURE_IO_POOL_SIZE VIOSND_MAX_OUTSTANDING_PACKETS
-/* Poll loops between capture diagnostic writes; roughly one second. */
-#define VIOSND_CAPTURE_DIAG_INTERVAL_LOOPS 100u
 #define VIOSND_CAPTURE_TARGET_OUTSTANDING_PACKETS 4u
 #define VIOSND_COMPLETION_STALL_LOG_LOOPS 50u
 #define VIOSND_RENDER_REKICK_STALL_LOOPS 5u
@@ -1937,6 +1935,7 @@ CViosndMiniportWaveRTStream::CaptureWorkerLoop()
     ULONG targetOutstanding;
     ULONG diagTicks = 0;
     BOOLEAN skipRecorded = FALSE;
+    BOOLEAN failureRecorded = FALSE;
 
     interval.QuadPart = -(10LL * VIOSND_CAPTURE_POLL_INTERVAL_US);
 
@@ -2066,16 +2065,23 @@ CViosndMiniportWaveRTStream::CaptureWorkerLoop()
             break;
         }
 
-        /* Once a second, say what the loop is actually doing. A capture path that submits
-         * nothing and one that submits and never completes look identical from the host, which
-         * only ever reports that its buffers went nowhere. */
-        if ((++diagTicks % VIOSND_CAPTURE_DIAG_INTERVAL_LOOPS) == 0) {
+        /*
+         * This line used to go out once a second for as long as the microphone was open. The
+         * enter/exit pair now brackets the worker and the exit line carries the same counters,
+         * so the heartbeat only ever said early what the end would say -- except in the one case
+         * the exit line cannot cover, which is a worker that never reaches its exit. What is
+         * worth keeping out of it is therefore the first failed submission, written once.
+         */
+        ++diagTicks;
+        if (m_CaptureSubmitFail != 0 && !failureRecorded) {
             WCHAR text[192];
 
+            failureRecorded = TRUE;
             if (NT_SUCCESS(RtlStringCchPrintfW(text,
                                                SIZEOF_ARRAY(text),
-                                               L"ok=%u fail=%u last=0x%08x inFlight=%u "
-                                               L"next=%u read=%u free=%u ready=%u state=%u",
+                                               L"first submit failure: ok=%u fail=%u last=0x%08x "
+                                               L"inFlight=%u next=%u read=%u free=%u ready=%u "
+                                               L"state=%u loop=%u",
                                                m_CaptureSubmitOk,
                                                m_CaptureSubmitFail,
                                                m_CaptureLastSubmitStatus,
@@ -2084,7 +2090,8 @@ CViosndMiniportWaveRTStream::CaptureWorkerLoop()
                                                m_CaptureReadPackets,
                                                m_CaptureIoFreeCount,
                                                m_OutstandingWrites,
-                                               m_State))) {
+                                               m_State,
+                                               diagTicks))) {
                 ViosndRecordDiag(m_Device, L"CaptureWorker", text);
             }
         }
@@ -2584,12 +2591,17 @@ CViosndMiniportWaveRTStream::GetPosition(_Out_ PKSAUDIO_POSITION Position)
     m_RenderPositionQueries++;
 
     /*
-     * The position the pin reports comes from a free-running clock; what the device has actually
-     * taken is counted separately. If those two drift apart, the engine writes relative to one
-     * of them while this driver reads from the other, and a steady tone comes out torn. The
-     * difference has only ever been printed to a debugger, which on this machine does not exist.
+     * What the stream started out as: the geometry the engine settled on, and the first offsets
+     * it was handed. The first few queries only.
+     *
+     * This used to repeat every 256 queries, which is a registry write every couple of seconds
+     * for as long as anything plays. The heartbeat existed to watch the reported position drift
+     * away from what the device had actually taken -- the cause of the torn playback -- and it
+     * has nothing left to report: the position is derived from completions now and interpolated
+     * within a single packet, so the difference it printed cannot exceed one packet by
+     * construction. A number that can no longer be wrong is not worth a hive write a second.
      */
-    if (m_RenderPositionQueries <= 4 || (m_RenderPositionQueries % 256) == 0) {
+    if (m_RenderPositionQueries <= 4) {
         WCHAR text[224];
         LONGLONG drift = (LONGLONG)currentPosition - (LONGLONG)m_Position;
 
