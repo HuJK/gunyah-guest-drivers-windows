@@ -230,10 +230,24 @@ CViosndMiniportTopology::CViosndMiniportTopology(_In_ BOOLEAN Capture, _In_ ULON
     m_Filter.Pins = m_Pins;
     m_Filter.PinCount = SIZEOF_ARRAY(m_Pins);
 
-    /* NULL leaves the pin named after its node type, which is what every endpoint on the card
-     * was called before. A slot past the pool gets that same fallback rather than a wrong name. */
-    m_Pins[VIOSND_TOPO_PIN_BRIDGE].KsPinDescriptor.Name =
-        ViosndEndpointNameGuid(Capture, Index);
+    /*
+     * The category, not the name.
+     *
+     * Measured: an endpoint's description comes from the bridge pin's *category* resolved through
+     * MediaCategories -- every endpoint reported KSNODETYPE_SPEAKER and every one was therefore
+     * called "Speakers", including a brand-new one built after the pin's Name had been set. The
+     * Name is what KSPROPERTY_PIN_NAME answers with, and the endpoint builder does not use it.
+     *
+     * Index 0 keeps the real node type. The classification that hangs off it -- the icon, the
+     * form factor, whether Windows believes this is a speaker at all -- is a lot to put on an
+     * invented GUID, and the endpoint that exists on every card is not the place to find out.
+     * The INF pins the form factor for the rest.
+     */
+    const GUID *name = Index == 0 ? NULL : ViosndEndpointNameGuid(Capture, Index);
+    if (name != NULL) {
+        m_Pins[VIOSND_TOPO_PIN_BRIDGE].KsPinDescriptor.Category = name;
+    }
+    m_Pins[VIOSND_TOPO_PIN_BRIDGE].KsPinDescriptor.Name = name;
 }
 
 STDMETHODIMP_(NTSTATUS)

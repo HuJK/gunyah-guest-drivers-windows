@@ -134,6 +134,7 @@ AddReg = XcbVirtioAudio.I.TopologyOut2.AddReg
 
 [XcbVirtioAudio.I.TopologyOut2.AddReg]
 HKR,,FriendlyName,,%XcbVirtioAudio.TopologyOut2%
+HKR,EP\0,%PKEY_AudioEndpoint_FormFactor%,0x00010001,1
 
 [XcbVirtioAudio.I.WaveIn2]
 AddReg = XcbVirtioAudio.I.WaveIn2.AddReg
@@ -146,6 +147,7 @@ AddReg = XcbVirtioAudio.I.TopologyIn2.AddReg
 
 [XcbVirtioAudio.I.TopologyIn2.AddReg]
 HKR,,FriendlyName,,%XcbVirtioAudio.TopologyIn2%
+HKR,EP\0,%PKEY_AudioEndpoint_FormFactor%,0x00010001,4
 
 [XcbVirtioAudio.I.WaveOut3]
 AddReg = XcbVirtioAudio.I.WaveOut3.AddReg
@@ -158,6 +160,7 @@ AddReg = XcbVirtioAudio.I.TopologyOut3.AddReg
 
 [XcbVirtioAudio.I.TopologyOut3.AddReg]
 HKR,,FriendlyName,,%XcbVirtioAudio.TopologyOut3%
+HKR,EP\0,%PKEY_AudioEndpoint_FormFactor%,0x00010001,1
 
 [XcbVirtioAudio.I.WaveIn3]
 AddReg = XcbVirtioAudio.I.WaveIn3.AddReg
@@ -170,6 +173,7 @@ AddReg = XcbVirtioAudio.I.TopologyIn3.AddReg
 
 [XcbVirtioAudio.I.TopologyIn3.AddReg]
 HKR,,FriendlyName,,%XcbVirtioAudio.TopologyIn3%
+HKR,EP\0,%PKEY_AudioEndpoint_FormFactor%,0x00010001,4
 
 [XcbVirtioAudio.I.WaveOut4]
 AddReg = XcbVirtioAudio.I.WaveOut4.AddReg
@@ -182,6 +186,7 @@ AddReg = XcbVirtioAudio.I.TopologyOut4.AddReg
 
 [XcbVirtioAudio.I.TopologyOut4.AddReg]
 HKR,,FriendlyName,,%XcbVirtioAudio.TopologyOut4%
+HKR,EP\0,%PKEY_AudioEndpoint_FormFactor%,0x00010001,1
 
 [XcbVirtioAudio.I.WaveIn4]
 AddReg = XcbVirtioAudio.I.WaveIn4.AddReg
@@ -194,6 +199,7 @@ AddReg = XcbVirtioAudio.I.TopologyIn4.AddReg
 
 [XcbVirtioAudio.I.TopologyIn4.AddReg]
 HKR,,FriendlyName,,%XcbVirtioAudio.TopologyIn4%
+HKR,EP\0,%PKEY_AudioEndpoint_FormFactor%,0x00010001,4
 
 [XcbVirtioAudio_Device.NT.Services]
 AddService = viosnd,0x00000002,XcbVirtioAudio_Service_Install
@@ -231,6 +237,7 @@ XcbVirtioAudio.TopologyOut4 = "XCB VirtIO Audio Speaker 4"
 XcbVirtioAudio.WaveIn4     = "XCB VirtIO Audio Microphone 4 Wave"
 XcbVirtioAudio.TopologyIn4 = "XCB VirtIO Audio Microphone 4"
 PKEY_AudioEndpoint_Default_VolumeInDb = "{1DA5D803-D492-4EDD-8C23-E0C0FFEE7F0E},9"
+PKEY_AudioEndpoint_FormFactor         = "{1DA5D803-D492-4EDD-8C23-E0C0FFEE7F0E},0"
 KSNAME_WaveOut            = "XCBVirtioAudioWaveOut"
 KSNAME_TopologyOut        = "XCBVirtioAudioTopologyOut"
 KSNAME_WaveIn             = "XCBVirtioAudioWaveIn"
