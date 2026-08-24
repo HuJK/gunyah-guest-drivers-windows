@@ -195,7 +195,7 @@ static PCFILTER_DESCRIPTOR ViosndCaptureTopoFilterDescriptor = {
 class CViosndMiniportTopology : public IMiniportTopology
 {
 public:
-    CViosndMiniportTopology(_In_ BOOLEAN Capture);
+    CViosndMiniportTopology(_In_ BOOLEAN Capture, _In_ ULONG Index);
 
     IMP_IMiniportTopology;
 
@@ -208,14 +208,32 @@ public:
 private:
     LONG m_RefCount;
     BOOLEAN m_Capture;
+    ULONG m_Index;
     PPORTTOPOLOGY m_Port;
+    /* A per-instance copy of the static description. The bridge pin's name is the one thing that
+     * differs between two endpoints of the same direction, and it is what Windows shows. */
+    PCPIN_DESCRIPTOR m_Pins[2];
+    PCFILTER_DESCRIPTOR m_Filter;
 };
 
-CViosndMiniportTopology::CViosndMiniportTopology(_In_ BOOLEAN Capture) :
+CViosndMiniportTopology::CViosndMiniportTopology(_In_ BOOLEAN Capture, _In_ ULONG Index) :
     m_RefCount(1),
     m_Capture(Capture),
+    m_Index(Index),
     m_Port(NULL)
 {
+    const PCFILTER_DESCRIPTOR *tmpl = Capture ? &ViosndCaptureTopoFilterDescriptor
+                                              : &ViosndRenderTopoFilterDescriptor;
+
+    RtlCopyMemory(m_Pins, tmpl->Pins, sizeof(m_Pins));
+    m_Filter = *tmpl;
+    m_Filter.Pins = m_Pins;
+    m_Filter.PinCount = SIZEOF_ARRAY(m_Pins);
+
+    /* NULL leaves the pin named after its node type, which is what every endpoint on the card
+     * was called before. A slot past the pool gets that same fallback rather than a wrong name. */
+    m_Pins[VIOSND_TOPO_PIN_BRIDGE].KsPinDescriptor.Name =
+        ViosndEndpointNameGuid(Capture, Index);
 }
 
 STDMETHODIMP_(NTSTATUS)
@@ -260,8 +278,7 @@ CViosndMiniportTopology::Release()
 STDMETHODIMP_(NTSTATUS)
 CViosndMiniportTopology::GetDescription(_Out_ PPCFILTER_DESCRIPTOR *Description)
 {
-    *Description = m_Capture ? &ViosndCaptureTopoFilterDescriptor :
-                               &ViosndRenderTopoFilterDescriptor;
+    *Description = &m_Filter;
     return STATUS_SUCCESS;
 }
 
@@ -432,11 +449,19 @@ ViosndTopologyPropertyHandler(_In_ PPCPROPERTY_REQUEST PropertyRequest)
 NTSTATUS
 ViosndCreateTopologyMiniport(
     _In_ BOOLEAN Capture,
+    _In_ ULONG Index,
+    _In_ ULONG Kind,
     _Outptr_ PMINIPORT *Miniport)
 {
     PVOID memory;
 
     *Miniport = NULL;
+
+    /* Before the subdevice is registered, because the lookup that turns this GUID into a name
+     * runs once, when Windows first builds the endpoint. A failure here costs the endpoint its
+     * name, not its audio, so it is logged and carried on from. */
+    (VOID)ViosndPublishEndpointName(Capture, Index, Kind);
+
     memory = ExAllocatePoolUninitialized(NonPagedPoolNx,
                                          sizeof(CViosndMiniportTopology),
                                          VIOSND_POOL_TAG);
@@ -444,6 +469,6 @@ ViosndCreateTopologyMiniport(
         return STATUS_INSUFFICIENT_RESOURCES;
     }
 
-    *Miniport = new(memory) CViosndMiniportTopology(Capture);
+    *Miniport = new(memory) CViosndMiniportTopology(Capture, Index);
     return STATUS_SUCCESS;
 }

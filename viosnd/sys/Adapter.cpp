@@ -219,7 +219,8 @@ ViosndCreateAndRegisterTopologySubdevice(
     _In_ PDEVICE_OBJECT DeviceObject,
     _In_ PIRP Irp,
     _In_ PRESOURCELIST ResourceList,
-    _In_ BOOLEAN Capture,
+    _In_ const VIOSND_ENDPOINT *Endpoint,
+    _In_ ULONG Index,
     _In_ PWSTR Name,
     _Out_ PVIOSND_SUBDEVICE Subdevice,
     _Out_ PVIOSND_REGISTER_STEPS Steps)
@@ -240,7 +241,10 @@ ViosndCreateAndRegisterTopologySubdevice(
         return status;
     }
 
-    status = ViosndCreateTopologyMiniport(Capture, &Subdevice->Miniport);
+    status = ViosndCreateTopologyMiniport(Endpoint->Capture,
+                                          Index,
+                                          Endpoint->Kind,
+                                          &Subdevice->Miniport);
     Steps->Miniport = status;
     if (NT_SUCCESS(status)) {
         status = Subdevice->Port->Init(DeviceObject,
@@ -284,6 +288,7 @@ ViosndRegisterAudioEndpoint(
     _In_ PRESOURCELIST ResourceList,
     _In_ PVIOSND_DEVICE Device,
     _In_ const VIOSND_ENDPOINT *Endpoint,
+    _In_ ULONG Index,
     _In_ PWSTR TopologyName,
     _In_ PWSTR WaveName,
     _Out_ PVIOSND_REGISTER_STEPS TopologySteps,
@@ -303,7 +308,8 @@ ViosndRegisterAudioEndpoint(
     status = ViosndCreateAndRegisterTopologySubdevice(DeviceObject,
                                                       Irp,
                                                       ResourceList,
-                                                      Endpoint->Capture,
+                                                      Endpoint,
+                                                      Index,
                                                       TopologyName,
                                                       &topology,
                                                       TopologySteps);
@@ -452,6 +458,7 @@ ViosndRegisterDirection(
                                                       ResourceList,
                                                       Device,
                                                       &Endpoints[i],
+                                                      i,
                                                       (PWSTR)TopologyNames[i],
                                                       (PWSTR)WaveNames[i],
                                                       &topologySteps,
