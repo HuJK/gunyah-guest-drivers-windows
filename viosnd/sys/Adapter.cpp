@@ -84,6 +84,16 @@ ViosndWriteDeviceDiagString(
     _In_z_ PCWSTR ValueName,
     _In_z_ PCWSTR Value)
 {
+    /*
+     * Recording a diagnostic means opening a registry key, and that is PASSIVE_LEVEL only. Some
+     * of what is worth recording happens on the audio engine's own path, which is not -- and a
+     * driver that bugchecks while explaining itself is worse than one that says nothing. Callers
+     * do not have to know which side of the line they are on.
+     */
+    if (KeGetCurrentIrql() != PASSIVE_LEVEL) {
+        return;
+    }
+
     HANDLE key = NULL;
     UNICODE_STRING name;
     UNICODE_STRING value;
