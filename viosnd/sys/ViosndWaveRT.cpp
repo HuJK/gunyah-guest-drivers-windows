@@ -422,17 +422,19 @@ ViosndUsableBufferSizeFromAllocatedSize(
 static ULONGLONG
 ViosndRenderBytesFromQpc(
     _In_ LONGLONG QpcDelta,
-    _In_ LONGLONG QpcFrequency)
+    _In_ LONGLONG QpcFrequency,
+    _In_ ULONG SampleRate,
+    _In_ ULONG FrameBytes)
 {
-    const ULONGLONG bytesPerSecond =
-        (ULONGLONG)VIOSND_DEFAULT_SAMPLE_RATE *
-        VIOSND_DEFAULT_CHANNELS *
-        (VIOSND_DEFAULT_BITS_PER_SAMPLE / 8u);
-    const ULONGLONG blockAlign =
-        VIOSND_DEFAULT_CHANNELS * (VIOSND_DEFAULT_BITS_PER_SAMPLE / 8u);
+    /* The stream's own rate and frame size, not the default ones. This is the position the
+     * render pin reports, and the audio engine paces every write it makes by it: describing a
+     * 32-bit stream with a 16-bit frame size advances it at half speed, and what comes out is
+     * not quiet or late but torn. */
+    const ULONGLONG bytesPerSecond = (ULONGLONG)SampleRate * FrameBytes;
+    const ULONGLONG blockAlign = FrameBytes;
     ULONGLONG bytes;
 
-    if (QpcDelta <= 0 || QpcFrequency <= 0) {
+    if (QpcDelta <= 0 || QpcFrequency <= 0 || bytesPerSecond == 0 || blockAlign == 0) {
         return 0;
     }
 
@@ -1371,11 +1373,18 @@ CViosndMiniportWaveRTStream::ReclaimCapturePackets()
             PVOID source = ViosndGetPcmIoAudioBuffer(io);
             PUCHAR destination = (PUCHAR)m_Buffer + offset;
             ULONG copyLength = min(bytesRead, m_PacketSize);
-            ULONG inputPeak = ViosndPcmPeak16(source, copyLength);
+            BOOLEAN sixteenBit = (BOOLEAN)(m_WaveFormat.ContainerBits == 16 &&
+                                           !m_WaveFormat.Float);
+            ULONG inputPeak = sixteenBit ? ViosndPcmPeak16(source, copyLength) : 0;
             ULONG outputPeak;
 
 #if VIOSND_CAPTURE_NOISE_GATE_PEAK != 0
-            if (inputPeak < VIOSND_CAPTURE_NOISE_GATE_PEAK) {
+            if (!sixteenBit) {
+                /* Nothing here knows how to read this format's samples. Carrying them through
+                 * untouched is right; measuring or gaining them as 16-bit would not be. */
+                RtlCopyMemory(destination, source, copyLength);
+                outputPeak = 0;
+            } else if (inputPeak < VIOSND_CAPTURE_NOISE_GATE_PEAK) {
                 RtlZeroMemory(destination, copyLength);
                 outputPeak = 0;
             } else {
@@ -1385,10 +1394,15 @@ CViosndMiniportWaveRTStream::ReclaimCapturePackets()
                                                  VIOSND_CAPTURE_SOFTWARE_GAIN);
             }
 #else
-            outputPeak = ViosndPcmCopyGain16(destination,
-                                             source,
-                                             copyLength,
-                                             VIOSND_CAPTURE_SOFTWARE_GAIN);
+            if (!sixteenBit) {
+                RtlCopyMemory(destination, source, copyLength);
+                outputPeak = 0;
+            } else {
+                outputPeak = ViosndPcmCopyGain16(destination,
+                                                 source,
+                                                 copyLength,
+                                                 VIOSND_CAPTURE_SOFTWARE_GAIN);
+            }
 #endif
 
             if (inputPeak > m_CaptureMaxInputPeak) {
@@ -1579,7 +1593,9 @@ CViosndMiniportWaveRTStream::GetRenderClockPosition()
     qpc = KeQueryPerformanceCounter(NULL);
     return m_RunStartPosition +
            ViosndRenderBytesFromQpc(qpc.QuadPart - m_RunStartQpc,
-                                    m_QpcFrequency);
+                                    m_QpcFrequency,
+                                    m_WaveFormat.SampleRate,
+                                    ViosndFrameBytes(&m_WaveFormat));
 }
 
 VOID
@@ -1590,10 +1606,17 @@ CViosndMiniportWaveRTStream::MaybeSwitchRenderFallback()
     ULONGLONG elapsedMs;
     ULONGLONG completedBytes;
     ULONGLONG expectedBytes;
+    /* Same reason as the clock: how far behind the stream is can only be measured against its
+     * own frame size. */
     const ULONGLONG bytesPerSecond =
-        (ULONGLONG)VIOSND_DEFAULT_SAMPLE_RATE *
-        VIOSND_DEFAULT_CHANNELS *
-        (VIOSND_DEFAULT_BITS_PER_SAMPLE / 8u);
+        (ULONGLONG)m_WaveFormat.SampleRate * ViosndFrameBytes(&m_WaveFormat);
+
+    /* The fallback is a 16kHz 16-bit stereo mode, and the downsampler that feeds it reads and
+     * writes SHORTs. It has nothing to say about a stream of another shape, so it does not run
+     * for one rather than producing something shaped wrongly. */
+    if (m_WaveFormat.ContainerBits != 16 || m_WaveFormat.Channels != 2 || m_WaveFormat.Float) {
+        return;
+    }
 
     if (m_Capture ||
         m_RenderFallbackAttempted ||
@@ -2839,9 +2862,14 @@ CViosndMiniportWaveRTStream::GetOutputStreamPresentationPosition(
     _Out_ KSAUDIO_PRESENTATION_POSITION *PresentationPosition)
 {
     ULONGLONG currentPosition = m_Capture ? m_Position : GetRenderClockPosition();
+    ULONG frameBytes = ViosndFrameBytes(&m_WaveFormat);
 
-    PresentationPosition->u64PositionInBlocks = currentPosition /
-        ((VIOSND_DEFAULT_CHANNELS * VIOSND_DEFAULT_BITS_PER_SAMPLE) / 8);
+    if (frameBytes == 0) {
+        frameBytes = (VIOSND_DEFAULT_CHANNELS * VIOSND_DEFAULT_BITS_PER_SAMPLE) / 8;
+    }
+    /* A block is a frame of the format this stream negotiated. Dividing a 32-bit stream's byte
+     * position by a 16-bit frame reports twice as many frames as have played. */
+    PresentationPosition->u64PositionInBlocks = currentPosition / frameBytes;
     PresentationPosition->u64QPCPosition = KeQueryPerformanceCounter(NULL).QuadPart;
     return STATUS_SUCCESS;
 }
