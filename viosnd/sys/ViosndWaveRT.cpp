@@ -2555,6 +2555,37 @@ CViosndMiniportWaveRTStream::GetPosition(_Out_ PKSAUDIO_POSITION Position)
     Position->PlayOffset = playOffset;
     Position->WriteOffset = (playOffset + writeLead) % m_BufferSize;
     m_RenderPositionQueries++;
+
+    /*
+     * The position the pin reports comes from a free-running clock; what the device has actually
+     * taken is counted separately. If those two drift apart, the engine writes relative to one
+     * of them while this driver reads from the other, and a steady tone comes out torn. The
+     * difference has only ever been printed to a debugger, which on this machine does not exist.
+     */
+    if (m_RenderPositionQueries <= 4 || (m_RenderPositionQueries % 256) == 0) {
+        WCHAR text[224];
+        LONGLONG drift = (LONGLONG)currentPosition - (LONGLONG)m_Position;
+
+        if (NT_SUCCESS(RtlStringCchPrintfW(text,
+                                           SIZEOF_ARRAY(text),
+                                           L"q=%u qpcPos=%llu donePos=%llu drift=%lld "
+                                           L"play=%llu write=%llu lead=%llu next=%u last=%u "
+                                           L"outstanding=%u buf=%u packet=%u",
+                                           m_RenderPositionQueries,
+                                           currentPosition,
+                                           m_Position,
+                                           drift,
+                                           Position->PlayOffset,
+                                           Position->WriteOffset,
+                                           writeLead,
+                                           m_NextSubmitPacket,
+                                           m_LastOsWritePacket,
+                                           m_OutstandingWrites,
+                                           m_BufferSize,
+                                           m_PacketSize))) {
+            ViosndRecordDiag(m_Device, L"RenderPosition", text);
+        }
+    }
     if (m_RenderPositionQueries <= 8 ||
         (m_RenderPositionQueries & 0x7f) == 0) {
         VIOSND_LOG(DPFLTR_IHVDRIVER_ID,
