@@ -612,6 +612,9 @@ private:
     ULONGLONG m_Position;
     ULONGLONG m_RunStartPosition;
     LONGLONG m_RunStartQpc;
+    /* When the endpoint last took a period. The reported position is measured forward from this
+     * rather than from the start of the run, so it can never drift away from what was consumed. */
+    LONGLONG m_LastCompletionQpc;
     LONGLONG m_QpcFrequency;
     ULONG m_RenderNotReadyLoops;
     ULONGLONG m_FallbackMonitorStartPosition;
@@ -734,6 +737,7 @@ CViosndMiniportWaveRTStream::CViosndMiniportWaveRTStream(
     m_Position(0),
     m_RunStartPosition(0),
     m_RunStartQpc(0),
+    m_LastCompletionQpc(0),
     m_QpcFrequency(0),
     m_RenderNotReadyLoops(0),
     m_FallbackMonitorStartPosition(0),
@@ -1099,6 +1103,7 @@ CViosndMiniportWaveRTStream::ReclaimRenderPackets(_Inout_ PULONG SubmittedSinceL
                     sourceBytes = bytesWritten;
                 }
                 m_Position += sourceBytes;
+                m_LastCompletionQpc = KeQueryPerformanceCounter(NULL).QuadPart;
                 m_PacketNumber++;
                 (*SubmittedSinceLog)++;
                 if ((m_PacketNumber & VIOSND_PERIODIC_LOG_MASK) == 0 ||
@@ -1579,23 +1584,42 @@ CViosndMiniportWaveRTStream::StopRenderWorker()
     return TRUE;
 }
 
+/*
+ * Where playback has reached, as reported to the audio engine.
+ *
+ * This has to agree with the position this driver reads the shared buffer from, because the
+ * engine fills ahead of what it is told and this driver reads ahead of what it has sent: two
+ * pointers moving around one cyclic buffer. Measuring it from the start of the run instead --
+ * a free-running clock that nothing corrects -- let the two drift apart by 0.31s, at which point
+ * the read pointer was passing through regions the engine had not written yet, and a steady tone
+ * came out torn at eight period boundaries a second.
+ *
+ * So it is measured forward from the last period the endpoint actually took. The interpolation
+ * only smooths the step between completions, which is what the engine wants from a position, and
+ * it is clamped to one period so that a stalled endpoint cannot make the position run away from
+ * what was really consumed.
+ */
 ULONGLONG
 CViosndMiniportWaveRTStream::GetRenderClockPosition()
 {
     LARGE_INTEGER qpc;
+    ULONGLONG interpolated;
 
     if (m_Capture ||
-        m_RunStartQpc == 0 ||
+        m_LastCompletionQpc == 0 ||
         m_QpcFrequency <= 0) {
         return m_Position;
     }
 
     qpc = KeQueryPerformanceCounter(NULL);
-    return m_RunStartPosition +
-           ViosndRenderBytesFromQpc(qpc.QuadPart - m_RunStartQpc,
-                                    m_QpcFrequency,
-                                    m_WaveFormat.SampleRate,
-                                    ViosndFrameBytes(&m_WaveFormat));
+    interpolated = ViosndRenderBytesFromQpc(qpc.QuadPart - m_LastCompletionQpc,
+                                            m_QpcFrequency,
+                                            m_WaveFormat.SampleRate,
+                                            ViosndFrameBytes(&m_WaveFormat));
+    if (m_PacketSize != 0 && interpolated > m_PacketSize) {
+        interpolated = m_PacketSize;
+    }
+    return m_Position + interpolated;
 }
 
 VOID
@@ -1743,6 +1767,7 @@ CViosndMiniportWaveRTStream::SwitchRenderToFallback()
     qpc = KeQueryPerformanceCounter(&frequency);
     m_RunStartPosition = m_Position;
     m_RunStartQpc = qpc.QuadPart;
+    m_LastCompletionQpc = qpc.QuadPart;
     m_QpcFrequency = frequency.QuadPart;
     m_FallbackMonitorStartQpc = 0;
     m_FallbackMonitorStartPosition = 0;
@@ -2158,6 +2183,7 @@ CViosndMiniportWaveRTStream::SetState(_In_ KSSTATE State)
             m_FallbackMonitorStartQpc = 0;
             m_RunStartPosition = 0;
             m_RunStartQpc = 0;
+            m_LastCompletionQpc = 0;
             m_QpcFrequency = 0;
             status = ConfigureNegotiatedPcm();
             if (NT_SUCCESS(status)) {
@@ -2191,6 +2217,7 @@ CViosndMiniportWaveRTStream::SetState(_In_ KSSTATE State)
                 qpc = KeQueryPerformanceCounter(&frequency);
                 m_RunStartPosition = m_Position;
                 m_RunStartQpc = qpc.QuadPart;
+                m_LastCompletionQpc = qpc.QuadPart;
                 m_QpcFrequency = frequency.QuadPart;
                 m_State = State;
                 status = StartRenderWorker();
