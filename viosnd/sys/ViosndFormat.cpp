@@ -87,12 +87,24 @@ ViosndFrameBytes(
 /* Formats worth offering, best first: the order decides which one wins when the host's hint
  * names only a rate. Wider containers first so a host that can carry more is not pinned to 16
  * bits by an accident of enumeration order. */
+/*
+ * Float first, then integers widest to narrowest.
+ *
+ * The order decides what the endpoint defaults to, and float is what both ends of the chain
+ * already use: the Windows audio engine mixes in float, and the Android endpoints this device
+ * plays to run in float. Choosing anything else means the samples are converted twice on the way
+ * out and twice on the way back, to arrive in the format they started in.
+ *
+ * It only ever decides ties. A request is matched on its container width, its significant bits
+ * and whether it is float, so an integer request still lands on an integer format however this
+ * list is ordered.
+ */
 static const UCHAR ViosndFormatPreference[] = {
+    VIRTIO_SND_PCM_FMT_FLOAT,
     VIRTIO_SND_PCM_FMT_S32,
     VIRTIO_SND_PCM_FMT_S24,
     VIRTIO_SND_PCM_FMT_S24_3,
     VIRTIO_SND_PCM_FMT_S16,
-    VIRTIO_SND_PCM_FMT_FLOAT,
     VIRTIO_SND_PCM_FMT_U8
 };
 
