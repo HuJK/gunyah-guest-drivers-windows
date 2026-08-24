@@ -140,6 +140,15 @@ ViosndWriteDeviceInitDiag(
     ZwClose(key);
 }
 
+/* Where a subdevice registration got to. A single returned status says a registration failed but
+ * not which of the four calls did it, and PortCls returns the same codes from all of them. */
+typedef struct _VIOSND_REGISTER_STEPS {
+    NTSTATUS NewPort;
+    NTSTATUS Miniport;
+    NTSTATUS Init;
+    NTSTATUS Register;
+} VIOSND_REGISTER_STEPS, *PVIOSND_REGISTER_STEPS;
+
 static
 NTSTATUS
 ViosndCreateAndRegisterWaveRTSubdevice(
@@ -149,13 +158,16 @@ ViosndCreateAndRegisterWaveRTSubdevice(
     _In_ PVIOSND_DEVICE Device,
     _In_ const VIOSND_ENDPOINT *Endpoint,
     _In_ PWSTR Name,
-    _Out_ PVIOSND_SUBDEVICE Subdevice)
+    _Out_ PVIOSND_SUBDEVICE Subdevice,
+    _Out_ PVIOSND_REGISTER_STEPS Steps)
 {
     NTSTATUS status;
 
     RtlZeroMemory(Subdevice, sizeof(*Subdevice));
+    RtlZeroMemory(Steps, sizeof(*Steps));
 
     status = PcNewPort(&Subdevice->Port, CLSID_PortWaveRT);
+    Steps->NewPort = status;
     if (!NT_SUCCESS(status)) {
         VIOSND_LOG(DPFLTR_IHVDRIVER_ID,
                    DPFLTR_ERROR_LEVEL,
@@ -166,12 +178,14 @@ ViosndCreateAndRegisterWaveRTSubdevice(
     }
 
     status = ViosndCreateWaveRTMiniport(Device, Endpoint, &Subdevice->Miniport);
+    Steps->Miniport = status;
     if (NT_SUCCESS(status)) {
         status = Subdevice->Port->Init(DeviceObject,
                                        Irp,
                                        Subdevice->Miniport,
                                        NULL,
                                        ResourceList);
+        Steps->Init = status;
     }
     if (!NT_SUCCESS(status)) {
         VIOSND_LOG(DPFLTR_IHVDRIVER_ID,
@@ -183,6 +197,7 @@ ViosndCreateAndRegisterWaveRTSubdevice(
 
     if (NT_SUCCESS(status)) {
         status = PcRegisterSubdevice(DeviceObject, Name, Subdevice->Port);
+        Steps->Register = status;
         if (!NT_SUCCESS(status)) {
             VIOSND_LOG(DPFLTR_IHVDRIVER_ID,
                        DPFLTR_ERROR_LEVEL,
@@ -206,13 +221,16 @@ ViosndCreateAndRegisterTopologySubdevice(
     _In_ PRESOURCELIST ResourceList,
     _In_ BOOLEAN Capture,
     _In_ PWSTR Name,
-    _Out_ PVIOSND_SUBDEVICE Subdevice)
+    _Out_ PVIOSND_SUBDEVICE Subdevice,
+    _Out_ PVIOSND_REGISTER_STEPS Steps)
 {
     NTSTATUS status;
 
     RtlZeroMemory(Subdevice, sizeof(*Subdevice));
+    RtlZeroMemory(Steps, sizeof(*Steps));
 
     status = PcNewPort(&Subdevice->Port, CLSID_PortTopology);
+    Steps->NewPort = status;
     if (!NT_SUCCESS(status)) {
         VIOSND_LOG(DPFLTR_IHVDRIVER_ID,
                    DPFLTR_ERROR_LEVEL,
@@ -223,12 +241,14 @@ ViosndCreateAndRegisterTopologySubdevice(
     }
 
     status = ViosndCreateTopologyMiniport(Capture, &Subdevice->Miniport);
+    Steps->Miniport = status;
     if (NT_SUCCESS(status)) {
         status = Subdevice->Port->Init(DeviceObject,
                                        Irp,
                                        Subdevice->Miniport,
                                        NULL,
                                        ResourceList);
+        Steps->Init = status;
     }
     if (!NT_SUCCESS(status)) {
         VIOSND_LOG(DPFLTR_IHVDRIVER_ID,
@@ -240,6 +260,7 @@ ViosndCreateAndRegisterTopologySubdevice(
 
     if (NT_SUCCESS(status)) {
         status = PcRegisterSubdevice(DeviceObject, Name, Subdevice->Port);
+        Steps->Register = status;
         if (!NT_SUCCESS(status)) {
             VIOSND_LOG(DPFLTR_IHVDRIVER_ID,
                        DPFLTR_ERROR_LEVEL,
@@ -264,7 +285,10 @@ ViosndRegisterAudioEndpoint(
     _In_ PVIOSND_DEVICE Device,
     _In_ const VIOSND_ENDPOINT *Endpoint,
     _In_ PWSTR TopologyName,
-    _In_ PWSTR WaveName)
+    _In_ PWSTR WaveName,
+    _Out_ PVIOSND_REGISTER_STEPS TopologySteps,
+    _Out_ PVIOSND_REGISTER_STEPS WaveSteps,
+    _Out_ PNTSTATUS ConnectionStatus)
 {
     NTSTATUS status;
     VIOSND_SUBDEVICE topology;
@@ -272,13 +296,17 @@ ViosndRegisterAudioEndpoint(
 
     RtlZeroMemory(&topology, sizeof(topology));
     RtlZeroMemory(&wave, sizeof(wave));
+    RtlZeroMemory(TopologySteps, sizeof(*TopologySteps));
+    RtlZeroMemory(WaveSteps, sizeof(*WaveSteps));
+    *ConnectionStatus = STATUS_SUCCESS;
 
     status = ViosndCreateAndRegisterTopologySubdevice(DeviceObject,
                                                       Irp,
                                                       ResourceList,
                                                       Endpoint->Capture,
                                                       TopologyName,
-                                                      &topology);
+                                                      &topology,
+                                                      TopologySteps);
     if (!NT_SUCCESS(status)) {
         return status;
     }
@@ -289,7 +317,8 @@ ViosndRegisterAudioEndpoint(
                                                     Device,
                                                     Endpoint,
                                                     WaveName,
-                                                    &wave);
+                                                    &wave,
+                                                    WaveSteps);
     if (NT_SUCCESS(status)) {
         if (Endpoint->Capture) {
             status = PcRegisterPhysicalConnection(DeviceObject,
@@ -304,6 +333,7 @@ ViosndRegisterAudioEndpoint(
                                                   topology.Port,
                                                   VIOSND_TOPO_PIN_SOURCE);
         }
+        *ConnectionStatus = status;
         if (!NT_SUCCESS(status)) {
             VIOSND_LOG(DPFLTR_IHVDRIVER_ID,
                        DPFLTR_ERROR_LEVEL,
@@ -410,13 +440,45 @@ ViosndRegisterDirection(
     }
 
     for (ULONG i = 0; i < Count; ++i) {
+        VIOSND_REGISTER_STEPS topologySteps;
+        VIOSND_REGISTER_STEPS waveSteps;
+        NTSTATUS connection = STATUS_SUCCESS;
         NTSTATUS status = ViosndRegisterAudioEndpoint(DeviceObject,
                                                       Irp,
                                                       ResourceList,
                                                       Device,
                                                       &Endpoints[i],
                                                       (PWSTR)TopologyNames[i],
-                                                      (PWSTR)WaveNames[i]);
+                                                      (PWSTR)WaveNames[i],
+                                                      &topologySteps,
+                                                      &waveSteps,
+                                                      &connection);
+        {
+            WCHAR name[32];
+            WCHAR text[224];
+
+            if (NT_SUCCESS(RtlStringCchPrintfW(name,
+                                               SIZEOF_ARRAY(name),
+                                               L"Register%s%u",
+                                               Endpoints[i].Capture ? L"In" : L"Out",
+                                               i)) &&
+                NT_SUCCESS(RtlStringCchPrintfW(
+                    text,
+                    SIZEOF_ARRAY(text),
+                    L"topo port=0x%08x mini=0x%08x init=0x%08x reg=0x%08x | "
+                    L"wave port=0x%08x mini=0x%08x init=0x%08x reg=0x%08x | conn=0x%08x",
+                    topologySteps.NewPort,
+                    topologySteps.Miniport,
+                    topologySteps.Init,
+                    topologySteps.Register,
+                    waveSteps.NewPort,
+                    waveSteps.Miniport,
+                    waveSteps.Init,
+                    waveSteps.Register,
+                    connection))) {
+                ViosndRecordDiag(Device, name, text);
+            }
+        }
         if (NT_SUCCESS(status)) {
             (*Registered)++;
         } else {
