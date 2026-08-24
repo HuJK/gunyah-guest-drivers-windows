@@ -2242,6 +2242,35 @@ CViosndMiniportWaveRTStream::SetState(_In_ KSSTATE State)
                 m_QpcFrequency = 0;
                 m_State = oldState;
             }
+
+            /*
+             * The geometry the engine settled on, recorded where recording it works.
+             *
+             * This used to be taken from GetPosition, which is where the numbers are most
+             * obviously to hand -- and it never appeared, because that path runs above
+             * PASSIVE_LEVEL and the writer refuses there. The old code only ever got a value out
+             * by trying again every 256 queries until one landed. A state transition is the
+             * right place for it anyway: portcls calls SetState at PASSIVE_LEVEL, it happens
+             * once, and it is where the geometry becomes true. The capture side has said the
+             * same thing from the same place all along.
+             */
+            {
+                WCHAR text[192];
+
+                if (NT_SUCCESS(RtlStringCchPrintfW(text,
+                                                   SIZEOF_ARRAY(text),
+                                                   L"status=0x%08x packet=%u notif=%u buffer=%u "
+                                                   L"outstanding=%u next=%u preroll=%u",
+                                                   status,
+                                                   m_PacketSize,
+                                                   m_NotificationCount,
+                                                   m_BufferSize,
+                                                   m_OutstandingWrites,
+                                                   m_NextSubmitPacket,
+                                                   m_RenderPrerollPackets))) {
+                    ViosndRecordDiag(m_Device, L"RenderStart", text);
+                }
+            }
         } else {
             /*
              * ViosndCaptureFaulted is no longer a reason to refuse.
@@ -2590,41 +2619,6 @@ CViosndMiniportWaveRTStream::GetPosition(_Out_ PKSAUDIO_POSITION Position)
     Position->WriteOffset = (playOffset + writeLead) % m_BufferSize;
     m_RenderPositionQueries++;
 
-    /*
-     * What the stream started out as: the geometry the engine settled on, and the first offsets
-     * it was handed. The first few queries only.
-     *
-     * This used to repeat every 256 queries, which is a registry write every couple of seconds
-     * for as long as anything plays. The heartbeat existed to watch the reported position drift
-     * away from what the device had actually taken -- the cause of the torn playback -- and it
-     * has nothing left to report: the position is derived from completions now and interpolated
-     * within a single packet, so the difference it printed cannot exceed one packet by
-     * construction. A number that can no longer be wrong is not worth a hive write a second.
-     */
-    if (m_RenderPositionQueries <= 4) {
-        WCHAR text[224];
-        LONGLONG drift = (LONGLONG)currentPosition - (LONGLONG)m_Position;
-
-        if (NT_SUCCESS(RtlStringCchPrintfW(text,
-                                           SIZEOF_ARRAY(text),
-                                           L"q=%u qpcPos=%llu donePos=%llu drift=%lld "
-                                           L"play=%llu write=%llu lead=%llu next=%u last=%u "
-                                           L"outstanding=%u buf=%u packet=%u",
-                                           m_RenderPositionQueries,
-                                           currentPosition,
-                                           m_Position,
-                                           drift,
-                                           Position->PlayOffset,
-                                           Position->WriteOffset,
-                                           writeLead,
-                                           m_NextSubmitPacket,
-                                           m_LastOsWritePacket,
-                                           m_OutstandingWrites,
-                                           m_BufferSize,
-                                           m_PacketSize))) {
-            ViosndRecordDiag(m_Device, L"RenderPosition", text);
-        }
-    }
     if (m_RenderPositionQueries <= 8 ||
         (m_RenderPositionQueries & 0x7f) == 0) {
         VIOSND_LOG(DPFLTR_IHVDRIVER_ID,
