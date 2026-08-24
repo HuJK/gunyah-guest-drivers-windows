@@ -11,6 +11,4 @@ enum {
 NTSTATUS
 ViosndCreateTopologyMiniport(
     _In_ BOOLEAN Capture,
-    _In_ ULONG Index,
-    _In_ ULONG Kind,
     _Outptr_ PMINIPORT *Miniport);

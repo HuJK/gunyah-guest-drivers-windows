@@ -195,7 +195,7 @@ static PCFILTER_DESCRIPTOR ViosndCaptureTopoFilterDescriptor = {
 class CViosndMiniportTopology : public IMiniportTopology
 {
 public:
-    CViosndMiniportTopology(_In_ BOOLEAN Capture, _In_ ULONG Index);
+    CViosndMiniportTopology(_In_ BOOLEAN Capture);
 
     IMP_IMiniportTopology;
 
@@ -208,46 +208,14 @@ public:
 private:
     LONG m_RefCount;
     BOOLEAN m_Capture;
-    ULONG m_Index;
     PPORTTOPOLOGY m_Port;
-    /* A per-instance copy of the static description. The bridge pin's name is the one thing that
-     * differs between two endpoints of the same direction, and it is what Windows shows. */
-    PCPIN_DESCRIPTOR m_Pins[2];
-    PCFILTER_DESCRIPTOR m_Filter;
 };
 
-CViosndMiniportTopology::CViosndMiniportTopology(_In_ BOOLEAN Capture, _In_ ULONG Index) :
+CViosndMiniportTopology::CViosndMiniportTopology(_In_ BOOLEAN Capture) :
     m_RefCount(1),
     m_Capture(Capture),
-    m_Index(Index),
     m_Port(NULL)
 {
-    const PCFILTER_DESCRIPTOR *tmpl = Capture ? &ViosndCaptureTopoFilterDescriptor
-                                              : &ViosndRenderTopoFilterDescriptor;
-
-    RtlCopyMemory(m_Pins, tmpl->Pins, sizeof(m_Pins));
-    m_Filter = *tmpl;
-    m_Filter.Pins = m_Pins;
-    m_Filter.PinCount = SIZEOF_ARRAY(m_Pins);
-
-    /*
-     * The category, not the name.
-     *
-     * Measured: an endpoint's description comes from the bridge pin's *category* resolved through
-     * MediaCategories -- every endpoint reported KSNODETYPE_SPEAKER and every one was therefore
-     * called "Speakers", including a brand-new one built after the pin's Name had been set. The
-     * Name is what KSPROPERTY_PIN_NAME answers with, and the endpoint builder does not use it.
-     *
-     * Index 0 keeps the real node type. The classification that hangs off it -- the icon, the
-     * form factor, whether Windows believes this is a speaker at all -- is a lot to put on an
-     * invented GUID, and the endpoint that exists on every card is not the place to find out.
-     * The INF pins the form factor for the rest.
-     */
-    const GUID *name = Index == 0 ? NULL : ViosndEndpointNameGuid(Capture, Index);
-    if (name != NULL) {
-        m_Pins[VIOSND_TOPO_PIN_BRIDGE].KsPinDescriptor.Category = name;
-    }
-    m_Pins[VIOSND_TOPO_PIN_BRIDGE].KsPinDescriptor.Name = name;
 }
 
 STDMETHODIMP_(NTSTATUS)
@@ -292,7 +260,8 @@ CViosndMiniportTopology::Release()
 STDMETHODIMP_(NTSTATUS)
 CViosndMiniportTopology::GetDescription(_Out_ PPCFILTER_DESCRIPTOR *Description)
 {
-    *Description = &m_Filter;
+    *Description = m_Capture ? &ViosndCaptureTopoFilterDescriptor :
+                               &ViosndRenderTopoFilterDescriptor;
     return STATUS_SUCCESS;
 }
 
@@ -463,19 +432,11 @@ ViosndTopologyPropertyHandler(_In_ PPCPROPERTY_REQUEST PropertyRequest)
 NTSTATUS
 ViosndCreateTopologyMiniport(
     _In_ BOOLEAN Capture,
-    _In_ ULONG Index,
-    _In_ ULONG Kind,
     _Outptr_ PMINIPORT *Miniport)
 {
     PVOID memory;
 
     *Miniport = NULL;
-
-    /* Before the subdevice is registered, because the lookup that turns this GUID into a name
-     * runs once, when Windows first builds the endpoint. A failure here costs the endpoint its
-     * name, not its audio, so it is logged and carried on from. */
-    (VOID)ViosndPublishEndpointName(Capture, Index, Kind);
-
     memory = ExAllocatePoolUninitialized(NonPagedPoolNx,
                                          sizeof(CViosndMiniportTopology),
                                          VIOSND_POOL_TAG);
@@ -483,6 +444,6 @@ ViosndCreateTopologyMiniport(
         return STATUS_INSUFFICIENT_RESOURCES;
     }
 
-    *Miniport = new(memory) CViosndMiniportTopology(Capture, Index);
+    *Miniport = new(memory) CViosndMiniportTopology(Capture);
     return STATUS_SUCCESS;
 }

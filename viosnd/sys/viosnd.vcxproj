@@ -154,7 +154,6 @@
     <ClCompile Include="ViosndDebug.cpp" />
     <ClCompile Include="ViosndGuids.cpp" />
     <ClCompile Include="ViosndEndpoint.cpp" />
-    <ClCompile Include="ViosndEndpointName.cpp" />
     <ClCompile Include="ViosndFormat.cpp" />
     <ClCompile Include="ViosndPcm.cpp" />
     <ClCompile Include="ViosndTopology.cpp" />
@@ -168,7 +167,6 @@
     <ClInclude Include="trace.h" />
     <ClInclude Include="VirtioSnd.h" />
     <ClInclude Include="ViosndEndpoint.h" />
-    <ClInclude Include="ViosndEndpointName.h" />
     <ClInclude Include="ViosndFormat.h" />
     <ClInclude Include="ViosndPcm.h" />
     <ClInclude Include="ViosndTopology.h" />

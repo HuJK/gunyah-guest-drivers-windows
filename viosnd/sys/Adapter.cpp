@@ -230,7 +230,6 @@ ViosndCreateAndRegisterTopologySubdevice(
     _In_ PIRP Irp,
     _In_ PRESOURCELIST ResourceList,
     _In_ const VIOSND_ENDPOINT *Endpoint,
-    _In_ ULONG Index,
     _In_ PWSTR Name,
     _Out_ PVIOSND_SUBDEVICE Subdevice,
     _Out_ PVIOSND_REGISTER_STEPS Steps)
@@ -251,10 +250,7 @@ ViosndCreateAndRegisterTopologySubdevice(
         return status;
     }
 
-    status = ViosndCreateTopologyMiniport(Endpoint->Capture,
-                                          Index,
-                                          Endpoint->Kind,
-                                          &Subdevice->Miniport);
+    status = ViosndCreateTopologyMiniport(Endpoint->Capture, &Subdevice->Miniport);
     Steps->Miniport = status;
     if (NT_SUCCESS(status)) {
         status = Subdevice->Port->Init(DeviceObject,
@@ -298,7 +294,6 @@ ViosndRegisterAudioEndpoint(
     _In_ PRESOURCELIST ResourceList,
     _In_ PVIOSND_DEVICE Device,
     _In_ const VIOSND_ENDPOINT *Endpoint,
-    _In_ ULONG Index,
     _In_ PWSTR TopologyName,
     _In_ PWSTR WaveName,
     _Out_ PVIOSND_REGISTER_STEPS TopologySteps,
@@ -319,7 +314,6 @@ ViosndRegisterAudioEndpoint(
                                                       Irp,
                                                       ResourceList,
                                                       Endpoint,
-                                                      Index,
                                                       TopologyName,
                                                       &topology,
                                                       TopologySteps);
@@ -389,8 +383,13 @@ ViosndWriteEndpointCountDiag(
 /*
  * The names Windows binds a subdevice to. They come from static strings in the INF, so this
  * table and the INF have to agree, and its length is what actually limits how many endpoints a
- * card can show. Index 0 keeps the unsuffixed names: an upgrade that renamed it would orphan
- * whatever volume and default the user had set on the endpoint they already had.
+ * card can show.
+ *
+ * They are slot letters and mean nothing on purpose. Windows derives an endpoint's identity from
+ * this name and remembers what it settled on against it -- the volume, whether it is the default,
+ * which applications were routed to it -- and never revisits that. So changing a name costs every
+ * installed machine those settings once, which is a reason for the name never to carry anything
+ * that might want to change.
  */
 static PCWSTR const ViosndRenderWaveNames[] = {
     VIOSND_WAVEOUT_NAME,
@@ -468,7 +467,6 @@ ViosndRegisterDirection(
                                                       ResourceList,
                                                       Device,
                                                       &Endpoints[i],
-                                                      i,
                                                       (PWSTR)TopologyNames[i],
                                                       (PWSTR)WaveNames[i],
                                                       &topologySteps,

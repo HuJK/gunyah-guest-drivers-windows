@@ -12,7 +12,6 @@
 #include "ViosndPcm.h"
 #include "ViosndFormat.h"
 #include "ViosndEndpoint.h"
-#include "ViosndEndpointName.h"
 #include "ViosndVirtio.h"
 #include "ViosndTopology.h"
 #include "ViosndWaveRT.h"
