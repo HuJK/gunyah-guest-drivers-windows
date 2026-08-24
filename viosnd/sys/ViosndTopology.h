@@ -1,7 +1,7 @@
 #pragma once
 
-#define VIOSND_TOPOOUT_NAME L"XCBVirtioAudioTopologyOut"
-#define VIOSND_TOPOIN_NAME  L"XCBVirtioAudioTopologyIn"
+#define VIOSND_TOPOOUT_NAME L"XCBVirtioAudioRenderTopoA"
+#define VIOSND_TOPOIN_NAME  L"XCBVirtioAudioCaptureTopoA"
 
 enum {
     VIOSND_TOPO_PIN_SOURCE = 0,

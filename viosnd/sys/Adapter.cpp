@@ -384,30 +384,30 @@ ViosndWriteEndpointCountDiag(
  */
 static PCWSTR const ViosndRenderWaveNames[] = {
     VIOSND_WAVEOUT_NAME,
-    L"XCBVirtioAudioWaveOut2",
-    L"XCBVirtioAudioWaveOut3",
-    L"XCBVirtioAudioWaveOut4"
+    L"XCBVirtioAudioRenderB",
+    L"XCBVirtioAudioRenderC",
+    L"XCBVirtioAudioRenderD"
 };
 
 static PCWSTR const ViosndRenderTopologyNames[] = {
     VIOSND_TOPOOUT_NAME,
-    L"XCBVirtioAudioTopologyOut2",
-    L"XCBVirtioAudioTopologyOut3",
-    L"XCBVirtioAudioTopologyOut4"
+    L"XCBVirtioAudioRenderTopoB",
+    L"XCBVirtioAudioRenderTopoC",
+    L"XCBVirtioAudioRenderTopoD"
 };
 
 static PCWSTR const ViosndCaptureWaveNames[] = {
     VIOSND_WAVEIN_NAME,
-    L"XCBVirtioAudioWaveIn2",
-    L"XCBVirtioAudioWaveIn3",
-    L"XCBVirtioAudioWaveIn4"
+    L"XCBVirtioAudioCaptureB",
+    L"XCBVirtioAudioCaptureC",
+    L"XCBVirtioAudioCaptureD"
 };
 
 static PCWSTR const ViosndCaptureTopologyNames[] = {
     VIOSND_TOPOIN_NAME,
-    L"XCBVirtioAudioTopologyIn2",
-    L"XCBVirtioAudioTopologyIn3",
-    L"XCBVirtioAudioTopologyIn4"
+    L"XCBVirtioAudioCaptureTopoB",
+    L"XCBVirtioAudioCaptureTopoC",
+    L"XCBVirtioAudioCaptureTopoD"
 };
 
 /* Two subdevices per endpoint, both directions. Registering past the adapter's budget fails at
