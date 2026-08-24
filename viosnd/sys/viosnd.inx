@@ -109,6 +109,7 @@ AddReg = XcbVirtioAudio.I.TopologyOut.AddReg
 
 [XcbVirtioAudio.I.TopologyOut.AddReg]
 HKR,,FriendlyName,,%XcbVirtioAudio.TopologyOut%
+HKR,EP\0,%PKEY_Device_FriendlyName%,,"VirtIO Speakers A"
 
 [XcbVirtioAudio.I.WaveIn]
 AddReg = XcbVirtioAudio.I.WaveIn.AddReg
@@ -121,6 +122,7 @@ AddReg = XcbVirtioAudio.I.TopologyIn.AddReg
 
 [XcbVirtioAudio.I.TopologyIn.AddReg]
 HKR,,FriendlyName,,%XcbVirtioAudio.TopologyIn%
+HKR,EP\0,%PKEY_Device_FriendlyName%,,"VirtIO Microphone A"
 HKR,EP\0,%PKEY_AudioEndpoint_Default_VolumeInDb%,0x00010001,0x00000000
 
 [XcbVirtioAudio.I.WaveOut2]
@@ -134,6 +136,7 @@ AddReg = XcbVirtioAudio.I.TopologyOut2.AddReg
 
 [XcbVirtioAudio.I.TopologyOut2.AddReg]
 HKR,,FriendlyName,,%XcbVirtioAudio.TopologyOut2%
+HKR,EP\0,%PKEY_Device_FriendlyName%,,"VirtIO Speakers B"
 HKR,EP\0,%PKEY_AudioEndpoint_FormFactor%,0x00010001,1
 
 [XcbVirtioAudio.I.WaveIn2]
@@ -147,6 +150,7 @@ AddReg = XcbVirtioAudio.I.TopologyIn2.AddReg
 
 [XcbVirtioAudio.I.TopologyIn2.AddReg]
 HKR,,FriendlyName,,%XcbVirtioAudio.TopologyIn2%
+HKR,EP\0,%PKEY_Device_FriendlyName%,,"VirtIO Microphone B"
 HKR,EP\0,%PKEY_AudioEndpoint_FormFactor%,0x00010001,4
 
 [XcbVirtioAudio.I.WaveOut3]
@@ -160,6 +164,7 @@ AddReg = XcbVirtioAudio.I.TopologyOut3.AddReg
 
 [XcbVirtioAudio.I.TopologyOut3.AddReg]
 HKR,,FriendlyName,,%XcbVirtioAudio.TopologyOut3%
+HKR,EP\0,%PKEY_Device_FriendlyName%,,"VirtIO Speakers C"
 HKR,EP\0,%PKEY_AudioEndpoint_FormFactor%,0x00010001,1
 
 [XcbVirtioAudio.I.WaveIn3]
@@ -173,6 +178,7 @@ AddReg = XcbVirtioAudio.I.TopologyIn3.AddReg
 
 [XcbVirtioAudio.I.TopologyIn3.AddReg]
 HKR,,FriendlyName,,%XcbVirtioAudio.TopologyIn3%
+HKR,EP\0,%PKEY_Device_FriendlyName%,,"VirtIO Microphone C"
 HKR,EP\0,%PKEY_AudioEndpoint_FormFactor%,0x00010001,4
 
 [XcbVirtioAudio.I.WaveOut4]
@@ -186,6 +192,7 @@ AddReg = XcbVirtioAudio.I.TopologyOut4.AddReg
 
 [XcbVirtioAudio.I.TopologyOut4.AddReg]
 HKR,,FriendlyName,,%XcbVirtioAudio.TopologyOut4%
+HKR,EP\0,%PKEY_Device_FriendlyName%,,"VirtIO Speakers D"
 HKR,EP\0,%PKEY_AudioEndpoint_FormFactor%,0x00010001,1
 
 [XcbVirtioAudio.I.WaveIn4]
@@ -199,6 +206,7 @@ AddReg = XcbVirtioAudio.I.TopologyIn4.AddReg
 
 [XcbVirtioAudio.I.TopologyIn4.AddReg]
 HKR,,FriendlyName,,%XcbVirtioAudio.TopologyIn4%
+HKR,EP\0,%PKEY_Device_FriendlyName%,,"VirtIO Microphone D"
 HKR,EP\0,%PKEY_AudioEndpoint_FormFactor%,0x00010001,4
 
 [XcbVirtioAudio_Device.NT.Services]
@@ -238,6 +246,7 @@ XcbVirtioAudio.WaveIn4     = "XCB VirtIO Audio Microphone 4 Wave"
 XcbVirtioAudio.TopologyIn4 = "XCB VirtIO Audio Microphone 4"
 PKEY_AudioEndpoint_Default_VolumeInDb = "{1DA5D803-D492-4EDD-8C23-E0C0FFEE7F0E},9"
 PKEY_AudioEndpoint_FormFactor         = "{1DA5D803-D492-4EDD-8C23-E0C0FFEE7F0E},0"
+PKEY_Device_FriendlyName              = "{A45C254E-DF1C-4EFD-8020-67D146A850E0},14"
 KSNAME_WaveOut            = "XCBVirtioAudioRenderA"
 KSNAME_TopologyOut        = "XCBVirtioAudioRenderTopoA"
 KSNAME_WaveIn             = "XCBVirtioAudioCaptureA"
