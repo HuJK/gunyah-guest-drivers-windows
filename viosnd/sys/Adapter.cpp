@@ -404,6 +404,10 @@ static PCWSTR const ViosndCaptureTopologyNames[] = {
     L"XCBVirtioAudioTopologyIn4"
 };
 
+/* Two subdevices per endpoint, both directions. Registering past the adapter's budget fails at
+ * the fifth call with a status that says nothing about the cause. */
+C_ASSERT(VIOSND_MAX_SUBDEVICES >= VIOSND_MAX_ENDPOINTS * 2 * 2);
+
 C_ASSERT(SIZEOF_ARRAY(ViosndRenderWaveNames) == VIOSND_MAX_ENDPOINTS);
 C_ASSERT(SIZEOF_ARRAY(ViosndRenderTopologyNames) == VIOSND_MAX_ENDPOINTS);
 C_ASSERT(SIZEOF_ARRAY(ViosndCaptureWaveNames) == VIOSND_MAX_ENDPOINTS);
